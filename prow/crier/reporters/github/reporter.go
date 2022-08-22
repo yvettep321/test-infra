@@ -46,7 +46,7 @@ type Client struct {
 	gc          report.GitHubClient
 	config      config.Getter
 	reportAgent v1.ProwJobAgent
-	prLocks     *criercommonlib.ShardedLock
+	locks       *criercommonlib.ShardedLock
 	lister      ctrlruntimeclient.Reader
 }
 
@@ -56,10 +56,10 @@ func NewReporter(gc report.GitHubClient, cfg config.Getter, reportAgent v1.ProwJ
 		gc:          gc,
 		config:      cfg,
 		reportAgent: reportAgent,
-		prLocks:     criercommonlib.NewShardedLock(),
+		locks:       criercommonlib.NewShardedLock(),
 		lister:      lister,
 	}
-	c.prLocks.RunCleanup()
+	c.locks.RunCleanup()
 	return c
 }
 
@@ -108,14 +108,14 @@ func (c *Client) Report(ctx context.Context, log *logrus.Entry, pj *v1.ProwJob) 
 	}
 
 	// The github comment create/update/delete done for presubmits
-	// needs pr-level locking to avoid racing when reporting multiple
-	// jobs in parallel.
-	if pj.Spec.Type == v1.PresubmitJob {
+	// needs pr-level locking (commit-level locking for postsubmits)
+	// to avoid racing when reporting multiple jobs in parallel.
+	if pj.Spec.Type == v1.PresubmitJob || pj.Spec.Type == v1.PostsubmitJob {
 		key, err := lockKeyForPJ(pj)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get lockkey for job: %w", err)
 		}
-		lock, err := c.prLocks.GetLock(ctx, *key)
+		lock, err := c.locks.GetLock(ctx, key)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -191,12 +191,15 @@ func pjsToReport(ctx context.Context, log *logrus.Entry, lister ctrlruntimeclien
 	return toReport, nil
 }
 
-func lockKeyForPJ(pj *v1.ProwJob) (*criercommonlib.SimplePull, error) {
-	if pj.Spec.Type != v1.PresubmitJob {
-		return nil, fmt.Errorf("can only get lock key for presubmit jobs, was %q", pj.Spec.Type)
+func lockKeyForPJ(pj *v1.ProwJob) (criercommonlib.SimpleKey, error) {
+	if pj.Spec.Type != v1.PresubmitJob && pj.Spec.Type != v1.PostsubmitJob {
+		return nil, fmt.Errorf("can only get lock key for presubmit or postsubmit jobs, was %q", pj.Spec.Type)
 	}
 	if pj.Spec.Refs == nil {
 		return nil, errors.New("pj.Spec.Refs is nil")
+	}
+	if pj.Spec.Type == v1.PostsubmitJob {
+		return criercommonlib.NewSimpleCommit(pj.Spec.Refs.Org, pj.Spec.Refs.Repo, pj.Spec.Refs.BaseSHA), nil
 	}
 	if n := len(pj.Spec.Refs.Pulls); n != 1 {
 		return nil, fmt.Errorf("prowjob doesn't have one but %d pulls", n)

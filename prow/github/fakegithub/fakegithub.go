@@ -93,6 +93,10 @@ type FakeClient struct {
 	// org/repo#number:[]commit
 	CommitMap map[string][]github.RepositoryCommit
 
+	// PullRequests associated with a commit
+	// org/repo/SHA:[]PullRequest
+	CommitPullRequests map[string][]github.PullRequest
+
 	// Fake remote git storage. File name are keys
 	// and values map SHA to content
 	RemoteFiles map[string]map[string]string
@@ -140,6 +144,9 @@ type FakeClient struct {
 
 	// ListIssueCommentsWithContextError will be returned if set when ListIssueCommentsWithContext is called
 	ListIssueCommentsWithContextError error
+
+	// ListCommitCommentsWithContextError will be returned if set when ListCommitCommentsWithContext is called
+	ListCommitCommentsWithContextError error
 
 	// WasLabelAddedByHumanVal determines the return of the method with the same name
 	WasLabelAddedByHumanVal bool
@@ -1140,4 +1147,20 @@ func (f *FakeClient) TriggerGitHubWorkflow(org, repo string, id int) error {
 func (f *FakeClient) RequestReview(org, repo string, number int, logins []string) error {
 	f.ReviewersRequested = logins
 	return nil
+}
+
+// ListCommitPullRequesrs returns the list of PRs associated with a commit.
+func (f *FakeClient) ListCommitPullRequests(org, repo, SHA string) ([]github.PullRequest, error) {
+	return f.CommitPullRequests[fmt.Sprintf("%s/%s/%s", org, repo, SHA)], nil
+}
+
+func (f *FakeClient) CreateCommitCommentWithContext(ctx context.Context, org, repo, SHA, comment string) error {
+	return nil
+}
+
+func (f *FakeClient) ListCommitCommentsWithContext(ctx context.Context, org, repo, SHA string) ([]github.IssueComment, error) {
+	if f.ListCommitCommentsWithContextError != nil {
+		return nil, f.ListCommitCommentsWithContextError
+	}
+	return nil, nil
 }
