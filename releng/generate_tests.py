@@ -20,7 +20,7 @@ Usage example:
 
   In $GOPATH/src/k8s.io/test-infra,
 
-  $ bazel run //releng:generate_tests -- \
+  $ make -C releng generate-tests \
       --yaml-config-path=releng/test_config.yaml \
 """
 
@@ -45,7 +45,7 @@ PROW_CONFIG_TEMPLATE = """
       containers:
       - args:
         env:
-        image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-master
+        image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-master
         resources:
           requests:
             cpu: 1000m

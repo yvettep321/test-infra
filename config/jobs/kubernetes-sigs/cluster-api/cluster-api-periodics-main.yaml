@@ -2,16 +2,17 @@ periodics:
 - name: periodic-cluster-api-test-main
   interval: 1h
   decorate: true
-  labels:
-    preset-service-account: "true"
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   extra_refs:
   - org: kubernetes-sigs
     repo: cluster-api
     base_ref: main
     path_alias: sigs.k8s.io/cluster-api
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
       command:
       - "./scripts/ci-test.sh"
       resources:
@@ -22,9 +23,43 @@ periodics:
     testgrid-tab-name: capi-test-main
     testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
     testgrid-num-failures-to-alert: "4"
+- name: periodic-cluster-api-test-mink8s-main
+  interval: 1h
+  decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
+  extra_refs:
+  - org: kubernetes-sigs
+    repo: cluster-api
+    base_ref: main
+    path_alias: sigs.k8s.io/cluster-api
+  spec:
+    serviceAccountName: prowjob-default-sa
+    containers:
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
+      command:
+      - "./scripts/ci-test.sh"
+      env:
+      # This value determines the minimum Kubernetes
+      # supported version for Cluster API management cluster.
+      #
+      # To check the available envtest in Kubebuilder, please
+      # refer to https://github.com/kubernetes-sigs/kubebuilder/tree/tools-releases.
+      - name: KUBEBUILDER_ENVTEST_KUBERNETES_VERSION
+        value: "1.20.2"
+      resources:
+        requests:
+          cpu: 7300m
+  annotations:
+    testgrid-dashboards: sig-cluster-lifecycle-cluster-api
+    testgrid-tab-name: capi-test-mink8s-main
+    testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
+    testgrid-num-failures-to-alert: "4"
 - name: periodic-cluster-api-e2e-upgrade-v0-3-to-main
   interval: 1h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -38,8 +73,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
         args:
           - runner.sh
           - "./scripts/ci-e2e.sh"
@@ -51,8 +87,10 @@ periodics:
           - name: INIT_WITH_PROVIDERS_CONTRACT
             value: v1alpha3
           - name: INIT_WITH_KUBERNETES_VERSION
-            value: v1.21.2
-
+            value: v1.21.12
+          # CAPI does not work with v1.21 if ClusterClass is enabled, so we have to disable it.
+          - name: CLUSTER_TOPOLOGY
+            value: "false"
         # we need privileged mode in order to do docker in docker
         securityContext:
           privileged: true
@@ -64,9 +102,11 @@ periodics:
     testgrid-tab-name: capi-e2e-upgrade-v0-3-to-main
     testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
     testgrid-num-failures-to-alert: "4"
-- name: periodic-cluster-api-e2e-upgrade-v1-1-to-main
+- name: periodic-cluster-api-e2e-upgrade-v1-2-to-main
   interval: 1h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -80,8 +120,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
       args:
       - runner.sh
       - "./scripts/ci-e2e.sh"
@@ -89,11 +130,11 @@ periodics:
       - name: GINKGO_FOCUS
         value: "\\[clusterctl-Upgrade\\]"
       - name: INIT_WITH_BINARY
-        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.1.0/clusterctl-{OS}-{ARCH}
+        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.2.0/clusterctl-{OS}-{ARCH}
       - name: INIT_WITH_PROVIDERS_CONTRACT
         value: v1beta1
       - name: INIT_WITH_KUBERNETES_VERSION
-        value: v1.23.3
+        value: v1.24.0
 
       # we need privileged mode in order to do docker in docker
       securityContext:
@@ -103,12 +144,14 @@ periodics:
           cpu: 7300m
   annotations:
     testgrid-dashboards: sig-cluster-lifecycle-cluster-api
-    testgrid-tab-name: capi-e2e-upgrade-v1-1-to-main
+    testgrid-tab-name: capi-e2e-upgrade-v1-2-to-main
     testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
     testgrid-num-failures-to-alert: "4"
 - name: periodic-cluster-api-e2e-main
   interval: 1h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -122,8 +165,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
         args:
           - runner.sh
           - "./scripts/ci-e2e.sh"
@@ -144,6 +188,8 @@ periodics:
 - name: periodic-cluster-api-e2e-mink8s-main
   interval: 1h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -157,18 +203,22 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.24
       args:
       - runner.sh
       - "./scripts/ci-e2e.sh"
       env:
       - name: GINKGO_SKIP
-        value: "\\[Conformance\\] \\[K8s-Upgrade\\]|\\[IPv6\\]"
+        value: "\\[Conformance\\] \\[K8s-Upgrade\\]|\\[IPv6\\]|\\[ClusterClass\\]"
       # This value determines the minimum Kubernetes
       # supported version for Cluster API management cluster.
       - name: KUBERNETES_VERSION_MANAGEMENT
-        value: "stable-1.19"
+        value: "stable-1.20"
+      # CAPI does not work with v1.20 if ClusterClass is enabled, so we have to disable it.
+      - name: CLUSTER_TOPOLOGY
+        value: "false"
       # we need privileged mode in order to do docker in docker
       securityContext:
         privileged: true
@@ -180,34 +230,3 @@ periodics:
     testgrid-tab-name: capi-e2e-mink8s-main
     testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
     testgrid-num-failures-to-alert: "4"
-- name: periodic-cluster-api-verify-book-links-main
-  interval: 6h
-  decorate: true
-  extra_refs:
-  - org: kubernetes-sigs
-    repo: cluster-api
-    base_ref: main
-    path_alias: sigs.k8s.io/cluster-api
-  spec:
-    containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
-      command:
-      - "runner.sh"
-      - "make"
-      - "verify-book-links"
-      env:
-      - name: GITHUB_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: cluster-lifecycle-github-token
-            key: cluster-lifecycle-github-token
-  volumes:
-  - name: cluster-lifecycle-github-token
-    secret:
-      secretName: cluster-lifecycle-github-token
-      items:
-      - key: cluster-lifecycle-github-token
-        path: cluster-lifecycle-github-token
-  annotations:
-    testgrid-dashboards: sig-cluster-lifecycle-cluster-api
-    testgrid-tab-name: capi-verify-book-links-main

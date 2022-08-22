@@ -154,7 +154,12 @@ presets:
   - name: CONTROLLER_MANAGER_TEST_ARGS
     value: "--profiling --kube-api-qps=100 --kube-api-burst=100"
   - name: KUBELET_TEST_ARGS
-    value: "--enable-debugging-handlers"
+    value: "--enable-debugging-handlers --kube-api-qps=100 --kube-api-burst=100"
+  - name: NODE_KUBELET_TEST_ARGS
+    # e2-medium machines report the capacity of 2cpu.
+    # We adjust the allocatable to match reality and additionally tweak it
+    # to achieve roughly 1:4 allocatable cpu to memory ration.
+    value: "--kube-reserved=cpu=1050m"
   - name: KUBEPROXY_TEST_ARGS
     # TODO(#74011): Remove metrics-bind-address if the default is set.
     value: "--profiling --metrics-bind-address=0.0.0.0"
@@ -224,7 +229,7 @@ presets:
       core/v1/Secret
       core/v1/Service
       batch/v1/Job
-      batch/v1beta1/CronJob
+      batch/v1/CronJob
       apps/v1/DaemonSet
       apps/v1/Deployment
       apps/v1/ReplicaSet
@@ -248,6 +253,8 @@ presets:
     value: true
   - name: PROMETHEUS_STORAGE_CLASS_PROVISIONER
     value: pd.csi.storage.gke.io
+  - name: KUBE_APISERVER_GODEBUG
+    value: gctrace=1
 
   ###### Scalability Envs
   ### Common env variables for containerd scalability-related suites.
@@ -315,10 +322,14 @@ presets:
 - labels:
     preset-e2e-scalability-presubmits: "true"
   env:
+  - name: PROMETHEUS_SCRAPE_MASTER_KUBELETS
+    value: true
 
 - labels:
     preset-e2e-scalability-periodics: "true"
   env:
+  - name: PROMETHEUS_SCRAPE_MASTER_KUBELETS
+    value: true
 
 - labels:
     preset-e2e-scalability-periodics-master: "true"

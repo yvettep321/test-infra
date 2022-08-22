@@ -1,8 +1,10 @@
 periodics:
 
 - name: periodic-cluster-api-e2e-workload-upgrade-1-18-1-19-release-1-0
-  interval: 24h
+  interval: 48h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -16,8 +18,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
       args:
         - runner.sh
         - "./scripts/ci-e2e.sh"
@@ -45,8 +48,10 @@ periodics:
     testgrid-num-failures-to-alert: "4"
 
 - name: periodic-cluster-api-e2e-workload-upgrade-1-19-1-20-release-1-0
-  interval: 24h
+  interval: 48h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -60,8 +65,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
       args:
         - runner.sh
         - "./scripts/ci-e2e.sh"
@@ -89,8 +95,10 @@ periodics:
     testgrid-num-failures-to-alert: "4"
 
 - name: periodic-cluster-api-e2e-workload-upgrade-1-20-1-21-release-1-0
-  interval: 24h
+  interval: 48h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -104,8 +112,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
       args:
         - runner.sh
         - "./scripts/ci-e2e.sh"
@@ -133,8 +142,10 @@ periodics:
     testgrid-num-failures-to-alert: "4"
 
 - name: periodic-cluster-api-e2e-workload-upgrade-1-21-1-22-release-1-0
-  interval: 24h
+  interval: 48h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -148,8 +159,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
       args:
         - runner.sh
         - "./scripts/ci-e2e.sh"
@@ -159,7 +171,7 @@ periodics:
         - name: KUBERNETES_VERSION_UPGRADE_TO
           value: "stable-1.22"
         - name: ETCD_VERSION_UPGRADE_TO
-          value: "3.5.1-0"
+          value: "3.5.3-0"
         - name: COREDNS_VERSION_UPGRADE_TO
           value: "v1.8.4"
         - name: GINKGO_FOCUS
@@ -177,8 +189,10 @@ periodics:
     testgrid-num-failures-to-alert: "4"
 
 - name: periodic-cluster-api-e2e-workload-upgrade-1-22-1-23-release-1-0
-  interval: 24h
+  interval: 48h
   decorate: true
+  decoration_config:
+    gcs_credentials_secret: "" # Use workload identity for uploading artifacts
   labels:
     preset-dind-enabled: "true"
     preset-kind-volume-mounts: "true"
@@ -192,8 +206,9 @@ periodics:
     base_ref: master
     path_alias: k8s.io/kubernetes
   spec:
+    serviceAccountName: prowjob-default-sa
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
       args:
         - runner.sh
         - "./scripts/ci-e2e.sh"
@@ -203,7 +218,7 @@ periodics:
         - name: KUBERNETES_VERSION_UPGRADE_TO
           value: "stable-1.23"
         - name: ETCD_VERSION_UPGRADE_TO
-          value: "3.5.1-0"
+          value: "3.5.3-0"
         - name: COREDNS_VERSION_UPGRADE_TO
           # CAPI 1.0 only supports up to CoreDNS version 1.8.5.
           value: "v1.8.5"
@@ -218,49 +233,5 @@ periodics:
   annotations:
     testgrid-dashboards: sig-cluster-lifecycle-cluster-api-1.0
     testgrid-tab-name: capi-e2e-release-1-0-1-22-1-23
-    testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
-    testgrid-num-failures-to-alert: "4"
-
-- name: periodic-cluster-api-e2e-workload-upgrade-1-23-latest-release-1-0
-  interval: 24h
-  decorate: true
-  labels:
-    preset-dind-enabled: "true"
-    preset-kind-volume-mounts: "true"
-  extra_refs:
-  - org: kubernetes-sigs
-    repo: cluster-api
-    base_ref: release-1.0
-    path_alias: sigs.k8s.io/cluster-api
-  - org: kubernetes
-    repo: kubernetes
-    base_ref: master
-    path_alias: k8s.io/kubernetes
-  spec:
-    containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
-      args:
-      - runner.sh
-      - "./scripts/ci-e2e.sh"
-      env:
-      - name: KUBERNETES_VERSION_UPGRADE_FROM
-        value: "stable-1.23"
-      - name: KUBERNETES_VERSION_UPGRADE_TO
-        value: "ci/latest-1.24"
-      - name: ETCD_VERSION_UPGRADE_TO
-        value: "3.5.1-0"
-      - name: COREDNS_VERSION_UPGRADE_TO
-        value: "v1.8.6"
-      - name: GINKGO_FOCUS
-        value: "\\[K8s-Upgrade\\]"
-      # we need privileged mode in order to do docker in docker
-      securityContext:
-        privileged: true
-      resources:
-        requests:
-          cpu: 7300m
-  annotations:
-    testgrid-dashboards: sig-cluster-lifecycle-cluster-api-1.0
-    testgrid-tab-name: capi-e2e-release-1-0-1-23-latest
     testgrid-alert-email: sig-cluster-lifecycle-cluster-api-alerts@kubernetes.io
     testgrid-num-failures-to-alert: "4"

@@ -18,17 +18,6 @@
 REPO_ROOT:=${CURDIR}
 OUT_DIR=$(REPO_ROOT)/_output
 ################################################################################
-# ========================= Setup Go With Gimme ================================
-# go version to use for build etc.
-# go1.9+ can autodetect GOROOT, but if some other tool sets it ...
-GOROOT:=
-# enable modules
-GO111MODULE=on
-export PATH GOROOT GO111MODULE
-# work around broken PATH export
-SPACE:=$(subst ,, )
-SHELL:=env PATH=$(subst $(SPACE),\$(SPACE),$(PATH)) $(SHELL)
-################################################################################
 # ================================= Testing ====================================
 # unit tests (hermetic)
 unit: go-unit py-unit
@@ -61,6 +50,12 @@ clean:
 # gofmt
 #gofmt:
 #	hack/make-rules/update/gofmt.sh
+.PHONY: update-go-deps
+update-go-deps:
+	hack/make-rules/update/go-deps.sh
+.PHONY: verify-go-deps
+verify-go-deps:
+	hack/make-rules/verify/go-deps.sh
 ################################################################################
 # ================================== Linting ===================================
 # run linters, ensure generated code, etc.
@@ -68,9 +63,9 @@ clean:
 verify:
 	hack/make-rules/verify/all.sh
 # typescript linting
-.PHONY: verify-tslint
-verify-tslint:
-	hack/make-rules/verify/tslint.sh
+.PHONY: verify-eslint
+verify-eslint:
+	hack/make-rules/verify/eslint.sh
 # go linters
 .PHONY: go-lint
 go-lint:
@@ -111,4 +106,13 @@ verify-codegen:
 .PHONY: verify-boilerplate
 verify-boilerplate:
 	hack/make-rules/verify/boilerplate.sh
+.PHONY: verify-yamllint
+verify-yamllint:
+	hack/make-rules/verify/yamllint.sh
+.PHONY: update-proto
+update-proto:
+	hack/make-rules/update/proto.sh
+.PHONY: verify-proto
+verify-proto:
+	hack/make-rules/verify/proto.sh
 #################################################################################

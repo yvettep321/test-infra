@@ -178,8 +178,8 @@ resources:
   - k8s-jkns-gke-slow-1-4
   - k8s-jkns-pr-gci-bld-e2e-gce-fd
   - k8s-jkns-pr-kubeadm
-  - k8s-jnks-gci-autoscaling
-  - k8s-jnks-gci-autoscaling-migs
+  - k8s-jkns-gci-autoscaling
+  - k8s-jkns-gci-autoscaling-migs
   - k8s-kubeadm-1-6-on-1-7
   - kube-gce-upg-1-4-1-5-upg-clu
   - kube-gce-upg-1-4-1-5-upg-clu-n
@@ -326,6 +326,10 @@ resources:
     - k8s-presubmit-scale-45
   state: dirty
   type: scalability-presubmit-project
+- names:
+    - k8s-presubmit-scale
+  state: dirty
+  type: scalability-presubmit-5k-project
 - names:
   - k8s-jkns-gke-ubuntu
   - k8s-jkns-gke-ubuntu-1-6

@@ -10,11 +10,11 @@ periodics:
     extra_refs:
       - org: kubernetes-sigs
         repo: cluster-api-provider-vsphere
-        base_ref: master
+        base_ref: main
         path_alias: sigs.k8s.io/cluster-api-provider-vsphere
     spec:
       containers:
-        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
           command:
             - runner.sh
           args:
@@ -48,11 +48,11 @@ periodics:
     extra_refs:
       - org: kubernetes-sigs
         repo: cluster-api-provider-vsphere
-        base_ref: master
+        base_ref: main
         path_alias: sigs.k8s.io/cluster-api-provider-vsphere
     spec:
       containers:
-        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
           command:
             - runner.sh
           args:
@@ -86,11 +86,11 @@ periodics:
     extra_refs:
       - org: kubernetes-sigs
         repo: cluster-api-provider-vsphere
-        base_ref: master
+        base_ref: main
         path_alias: sigs.k8s.io/cluster-api-provider-vsphere
     spec:
       containers:
-        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+        - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
           command:
             - runner.sh
           args:

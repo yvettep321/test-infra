@@ -40,24 +40,49 @@ import (
 	"k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/git/v2"
 	"k8s.io/test-infra/prow/io"
+	"k8s.io/test-infra/prow/kube"
 	"k8s.io/test-infra/prow/pjutil"
 )
 
+const (
+	inRepoConfigRetries = 2
+	inRepoConfigFailed  = "Unable to get inRepoConfig. This could be due to a merge conflict or a flake. If a merge conflict, please rebase and fix conflicts. Otherwise try again with /test all"
+)
+
 var gerritMetrics = struct {
-	processingResults *prometheus.CounterVec
+	processingResults     *prometheus.CounterVec
+	triggerLatency        *prometheus.HistogramVec
+	changeProcessDuration *prometheus.HistogramVec
 }{
 	processingResults: prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "gerrit_processing_results",
 		Help: "Count of change processing by instance, repo, and result.",
 	}, []string{
-		"instance",
+		"org",
 		"repo",
 		"result",
+	}),
+	triggerLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gerrit_trigger_latency",
+		Help:    "Histogram of seconds between triggering event and ProwJob creation time.",
+		Buckets: []float64{5, 10, 20, 30, 60, 120, 180, 300, 600, 1200, 3600},
+	}, []string{
+		"org",
+		// Omit repo to avoid excessive cardinality due to the number of buckets.
+	}),
+	changeProcessDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "gerrit_instance_process_duration",
+		Help:    "Histogram of seconds spent processing a single gerrit instance.",
+		Buckets: []float64{5, 10, 20, 30, 60, 120, 180, 300, 600, 1200, 3600},
+	}, []string{
+		"org",
 	}),
 }
 
 func init() {
 	prometheus.MustRegister(gerritMetrics.processingResults)
+	prometheus.MustRegister(gerritMetrics.triggerLatency)
+	prometheus.MustRegister(gerritMetrics.changeProcessDuration)
 }
 
 type prowJobClient interface {
@@ -65,7 +90,10 @@ type prowJobClient interface {
 }
 
 type gerritClient interface {
+	ApplyGlobalConfig(orgRepoConfigGetter func() *config.GerritOrgRepoConfigs, lastSyncTracker *client.SyncTime, cookiefilePath, tokenPathOverride string, additionalFunc func())
+	Authenticate(cookiefilePath, tokenPath string)
 	QueryChanges(lastState client.LastSyncState, rateLimit int) map[string][]client.ChangeInfo
+	QueryChangesForInstance(instance string, lastState client.LastSyncState, rateLimit int) []client.ChangeInfo
 	GetBranchRevision(instance, project, branch string) (string, error)
 	SetReview(instance, id, revision, message string, labels map[string]string) error
 	Account(instance string) (*gerrit.AccountInfo, error)
@@ -73,16 +101,23 @@ type gerritClient interface {
 
 // Controller manages gerrit changes.
 type Controller struct {
-	config             config.Getter
-	prowJobClient      prowJobClient
-	gc                 gerritClient
-	tracker            LastSyncTracker
-	projectsOptOutHelp map[string]sets.String
-	lock               sync.RWMutex
-	cookieFilePath     string
-	cacheSize          int
-	configAgent        *config.Agent
-	repoCacheMap       map[string]*config.InRepoConfigCache
+	config               config.Getter
+	prowJobClient        prowJobClient
+	gc                   gerritClient
+	tracker              LastSyncTracker
+	projectsOptOutHelp   map[string]sets.String
+	lock                 sync.RWMutex
+	cookieFilePath       string
+	cacheSize            int
+	cacheCopies          int
+	configAgent          *config.Agent
+	repoCacheMap         map[string]*config.InRepoConfigCacheHandler
+	inRepoConfigFailures map[string]bool
+	instancesWithWorker  map[string]bool
+	repoCacheMapMux      sync.Mutex
+	latestMux            sync.Mutex
+	workerPoolSize       int
+	cacheDirBase         string
 }
 
 type LastSyncTracker interface {
@@ -92,7 +127,7 @@ type LastSyncTracker interface {
 
 // NewController returns a new gerrit controller client
 func NewController(ctx context.Context, prowJobClient prowv1.ProwJobInterface, op io.Opener,
-	ca *config.Agent, projects, projectsOptOutHelp map[string][]string, cookiefilePath, tokenPathOverride, lastSyncFallback string, cacheSize int) *Controller {
+	ca *config.Agent, projects, projectsOptOutHelp map[string][]string, cookiefilePath, tokenPathOverride, lastSyncFallback, cacheDirBase string, cacheSize, cacheCopies, workerPoolSize int) *Controller {
 
 	cfg := ca.Config
 	projectsOptOutHelpMap := map[string]sets.String{}
@@ -103,85 +138,65 @@ func NewController(ctx context.Context, prowJobClient prowv1.ProwJobInterface, o
 			projectsOptOutHelpMap[i] = sets.NewString(p...)
 		}
 	}
-	lastSyncTracker := &syncTime{
-		path:   lastSyncFallback,
-		ctx:    ctx,
-		opener: op,
-	}
-	if err := lastSyncTracker.init(projects); err != nil {
+	lastSyncTracker := client.NewSyncTime(lastSyncFallback, op, ctx)
+	if err := lastSyncTracker.Init(projects); err != nil {
 		logrus.WithError(err).Fatal("Error initializing lastSyncFallback.")
 	}
-	gerritClient, err := client.NewClient(projects)
+	gerritClient, err := client.NewClient(client.ProjectsFlagToConfig(projects))
 	if err != nil {
 		logrus.WithError(err).Fatal("Error creating gerrit client.")
 	}
 	c := &Controller{
-		prowJobClient:      prowJobClient,
-		config:             cfg,
-		gc:                 gerritClient,
-		tracker:            lastSyncTracker,
-		projectsOptOutHelp: projectsOptOutHelpMap,
-		cookieFilePath:     cookiefilePath,
-		cacheSize:          cacheSize,
-		configAgent:        ca,
-		repoCacheMap:       map[string]*config.InRepoConfigCache{},
+		prowJobClient:        prowJobClient,
+		config:               cfg,
+		gc:                   gerritClient,
+		tracker:              lastSyncTracker,
+		projectsOptOutHelp:   projectsOptOutHelpMap,
+		cookieFilePath:       cookiefilePath,
+		cacheSize:            cacheSize,
+		cacheCopies:          cacheCopies,
+		configAgent:          ca,
+		repoCacheMap:         map[string]*config.InRepoConfigCacheHandler{},
+		inRepoConfigFailures: map[string]bool{},
+		instancesWithWorker:  make(map[string]bool),
+		workerPoolSize:       workerPoolSize,
+		cacheDirBase:         cacheDirBase,
 	}
 
 	// applyGlobalConfig reads gerrit configurations from global gerrit config,
 	// it will completely override previously configured gerrit hosts and projects.
 	// it will also by the way authenticate gerrit
-	c.applyGlobalConfig(cfg, gerritClient, lastSyncTracker, cookiefilePath, tokenPathOverride)
+	orgRepoConfigGetter := func() *config.GerritOrgRepoConfigs {
+		return cfg().Gerrit.OrgReposConfig
+	}
+	c.gc.ApplyGlobalConfig(orgRepoConfigGetter, lastSyncTracker, cookiefilePath, tokenPathOverride, func() {
+		orgReposConfig := orgRepoConfigGetter()
+		if orgReposConfig == nil {
+			return
+		}
+		c.lock.Lock()
+		// Updates a map, lock to make sure it's thread safe.
+		c.projectsOptOutHelp = orgReposConfig.OptOutHelpRepos()
+		c.lock.Unlock()
+	})
 
 	// Authenticate creates a goroutine for rotating token secrets when called the first
 	// time, afterwards it only authenticate once.
 	// applyGlobalConfig calls authenticate only when global gerrit config presents,
 	// call it here is required for cases where gerrit repos are defined as command
 	// line arg(which is going to be deprecated).
-	gerritClient.Authenticate(cookiefilePath, tokenPathOverride)
+	c.gc.Authenticate(cookiefilePath, tokenPathOverride)
 
 	return c
 }
 
-func (c *Controller) applyGlobalConfig(cfg config.Getter, gerritClient *client.Client, lastSyncTracker *syncTime, cookiefilePath, tokenPathOverride string) {
-	c.applyGlobalConfigOnce(cfg, gerritClient, lastSyncTracker, cookiefilePath, tokenPathOverride)
-
-	go func() {
-		for {
-			c.applyGlobalConfigOnce(cfg, gerritClient, lastSyncTracker, cookiefilePath, tokenPathOverride)
-			// No need to spin constantly, give it a break. It's ok that config change has one second delay.
-			time.Sleep(time.Second)
-		}
-	}()
-}
-
-func (c *Controller) applyGlobalConfigOnce(cfg config.Getter, gerritClient *client.Client, lastSyncTracker *syncTime, cookiefilePath, tokenPathOverride string) {
-	orgReposConfig := cfg().Gerrit.OrgReposConfig
-	if orgReposConfig == nil {
-		return
-	}
-	// Use globally defined gerrit repos if present
-	if err := gerritClient.UpdateClients(orgReposConfig.AllRepos()); err != nil {
-		logrus.WithError(err).Error("Updating clients.")
-	}
-	if err := lastSyncTracker.update(orgReposConfig.AllRepos()); err != nil {
-		logrus.WithError(err).Error("Syncing states.")
-	}
-
-	c.lock.Lock()
-	// Updates a map, lock to make sure it's thread safe.
-	c.projectsOptOutHelp = orgReposConfig.OptOutHelpRepos()
-	c.lock.Unlock()
-	// Authenticate creates a goroutine for rotating token secrets when called the first
-	// time, afterwards it only authenticate once.
-	gerritClient.Authenticate(cookiefilePath, tokenPathOverride)
-}
-
 // Helper function to create the cache used for InRepoConfig. Currently only attempts to create cache and returns nil if failed.
-func createCache(cloneURI *url.URL, cookieFilePath string, cacheSize int, configAgent *config.Agent) (cache *config.InRepoConfigCache, err error) {
+func createCache(cloneURI *url.URL, cookieFilePath, cacheDirBase string, cacheSize, cacheCopies int, configAgent *config.Agent) (cache *config.InRepoConfigCacheHandler, err error) {
 	opts := git.ClientFactoryOpts{
 		CloneURI:       cloneURI.String(),
 		Host:           cloneURI.Host,
 		CookieFilePath: cookieFilePath,
+		CacheDirBase:   &cacheDirBase,
 	}
 	gc, err := git.NewClientFactory(opts.Apply)
 	if err != nil {
@@ -189,10 +204,11 @@ func createCache(cloneURI *url.URL, cookieFilePath string, cacheSize int, config
 	}
 	// Initialize cache for fetching Presubmit and Postsubmit information. If
 	// the cache cannot be initialized, exit with an error.
-	cache, err = config.NewInRepoConfigCache(
+	cache, err = config.NewInRepoConfigCacheHandler(
 		cacheSize,
 		configAgent,
-		config.NewInRepoConfigGitCache(gc))
+		config.NewInRepoConfigGitCache(gc),
+		cacheCopies)
 	// If we cannot initialize the cache, exit with an error.
 	if err != nil {
 		return nil, fmt.Errorf("unable to initialize in-repo-config-cache with size %d: %v", cacheSize, err)
@@ -200,50 +216,115 @@ func createCache(cloneURI *url.URL, cookieFilePath string, cacheSize int, config
 	return cache, nil
 }
 
+type Change struct {
+	changeInfo gerrit.ChangeInfo
+	instance   string
+}
+
+func (c *Controller) syncChange(latest client.LastSyncState, changeChan <-chan Change, log *logrus.Entry, wg *sync.WaitGroup) {
+	for changeStruct := range changeChan {
+		change := changeStruct.changeInfo
+		instance := changeStruct.instance
+
+		log := log.WithFields(logrus.Fields{
+			"branch":   change.Branch,
+			"change":   change.Number,
+			"repo":     change.Project,
+			"revision": change.CurrentRevision,
+		})
+
+		cloneURI, err := makeCloneURI(instance, change.Project)
+		if err != nil {
+			log.WithError(err).Error("makeCloneURI.")
+		}
+
+		c.repoCacheMapMux.Lock()
+		cache, ok := c.repoCacheMap[cloneURI.String()]
+		if !ok {
+			if cache, err = createCache(cloneURI, c.cookieFilePath, c.cacheDirBase, c.cacheSize, c.cacheCopies, c.configAgent); err != nil {
+				c.repoCacheMapMux.Unlock()
+				wg.Done()
+				log.WithError(err).Error("create repo cache.")
+				continue
+			}
+			c.repoCacheMap[cloneURI.String()] = cache
+		}
+		c.repoCacheMapMux.Unlock()
+
+		result := client.ResultSuccess
+		if err := c.processChange(log, instance, change, cloneURI, cache); err != nil {
+			result = client.ResultError
+			log.WithError(err).Info("Failed to process change")
+		}
+		gerritMetrics.processingResults.WithLabelValues(instance, change.Project, result).Inc()
+
+		c.latestMux.Lock()
+		lastTime, ok := latest[instance][change.Project]
+		if !ok || lastTime.Before(change.Updated.Time) {
+			lastTime = change.Updated.Time
+			latest[instance][change.Project] = lastTime
+		}
+		c.latestMux.Unlock()
+		wg.Done()
+	}
+}
+
 // Sync looks for newly made gerrit changes
 // and creates prowjobs according to specs
-func (c *Controller) Sync() error {
-	syncTime := c.tracker.Current()
-	latest := syncTime.DeepCopy()
-	for instance, changes := range c.gc.QueryChanges(syncTime, c.config().Gerrit.RateLimit) {
+func (c *Controller) Sync() {
+	processSingleInstance := func(instance string) {
 		log := logrus.WithField("host", instance)
-		for _, change := range changes {
-			log := log.WithFields(logrus.Fields{
-				"branch":   change.Branch,
-				"change":   change.Number,
-				"repo":     change.Project,
-				"revision": change.CurrentRevision,
-			})
+		syncTime := c.tracker.Current()
+		latest := syncTime.DeepCopy()
 
-			cloneURI, err := makeCloneURI(instance, change.Project)
-			if err != nil {
-				return fmt.Errorf("makeCloneURI: %w", err)
-			}
+		now := time.Now()
+		defer func() {
+			gerritMetrics.changeProcessDuration.WithLabelValues(instance).Observe(float64(time.Since(now).Seconds()))
+		}()
 
-			cache, ok := c.repoCacheMap[cloneURI.Host]
-			if !ok {
-				if cache, err = createCache(cloneURI, c.cookieFilePath, c.cacheSize, c.configAgent); err != nil {
-					return err
-				}
-				c.repoCacheMap[cloneURI.Host] = cache
-			}
-
-			result := client.ResultSuccess
-			if err := c.processChange(log, instance, change, cloneURI, cache); err != nil {
-				result = client.ResultError
-				log.WithError(err).Errorf("Failed to process change")
-			}
-			gerritMetrics.processingResults.WithLabelValues(instance, change.Project, result).Inc()
-
-			lastTime, ok := latest[instance][change.Project]
-			if !ok || lastTime.Before(change.Updated.Time) {
-				lastTime = change.Updated.Time
-				latest[instance][change.Project] = lastTime
-			}
+		changes := c.gc.QueryChangesForInstance(instance, syncTime, c.config().Gerrit.RateLimit)
+		if len(changes) == 0 {
+			return
 		}
-		log.Infof("Processed %d changes", len(changes))
+		log.WithFields(logrus.Fields{"instance": instance, "changes": len(changes)}).Info("Finished querying instance for changes")
+
+		var wg sync.WaitGroup
+		wg.Add(len(changes))
+
+		changeChan := make(chan Change)
+		for i := 0; i < c.workerPoolSize; i++ {
+			go c.syncChange(latest, changeChan, log, &wg)
+		}
+		for _, change := range changes {
+			changeChan <- Change{changeInfo: change, instance: instance}
+		}
+		wg.Wait()
+		close(changeChan)
+		c.tracker.Update(latest)
 	}
-	return c.tracker.Update(latest)
+
+	for instance := range c.config().Gerrit.OrgReposConfig.AllRepos() {
+		if _, ok := c.instancesWithWorker[instance]; ok {
+			// The work thread of already up for this instance, nothing needs
+			// to be done.
+			continue
+		}
+		c.instancesWithWorker[instance] = true
+
+		// First time see this instance, spin up a worker thread for it
+		logrus.WithField("instance", instance).Info("Start worker for instance.")
+		go func(instance string) {
+			previousRun := time.Now()
+			for {
+				timeDiff := time.Until(previousRun.Add(c.config().Gerrit.TickInterval.Duration))
+				if timeDiff > 0 {
+					time.Sleep(timeDiff)
+				}
+				previousRun = time.Now()
+				processSingleInstance(instance)
+			}
+		}(instance)
+	}
 }
 
 func makeCloneURI(instance, project string) (*url.URL, error) {
@@ -334,7 +415,7 @@ func failedJobs(account int, revision int, messages ...gerrit.ChangeMessageInfo)
 				continue
 			}
 			times[name] = message.Date.Time
-			if job.State == prowapi.FailureState || job.State == prowapi.ErrorState {
+			if job.State == prowapi.FailureState || job.State == prowapi.ErrorState || job.State == prowapi.AbortedState {
 				failures.Insert(name)
 			} else {
 				failures.Delete(name)
@@ -344,8 +425,30 @@ func failedJobs(account int, revision int, messages ...gerrit.ChangeMessageInfo)
 	return failures
 }
 
+func (c *Controller) handleInRepoConfigError(err error, instance string, change gerrit.ChangeInfo) error {
+	key := fmt.Sprintf("%s%s%s", instance, change.ID, change.CurrentRevision)
+	if err != nil {
+		// If we have not already recorded this failure send an error essage
+		if failed, ok := c.inRepoConfigFailures[key]; !ok || !failed {
+			if setReviewWerr := c.gc.SetReview(instance, change.ID, change.CurrentRevision, inRepoConfigFailed, nil); setReviewWerr != nil {
+				return fmt.Errorf("failed to get inRepoConfig and failed to set Review to notify user: %v and %v", err, setReviewWerr)
+			}
+			c.inRepoConfigFailures[key] = true
+		}
+
+		// We do not want to return that there was an error processing change. If we are unable to get inRepoConfig we do not process. This is expected behavior.
+		return nil
+	}
+
+	// If failed in the past but passes now, allow future failures to send message
+	if _, ok := c.inRepoConfigFailures[key]; ok {
+		c.inRepoConfigFailures[key] = false
+	}
+	return nil
+}
+
 // processChange creates new presubmit/postsubmit prowjobs base off the gerrit changes
-func (c *Controller) processChange(logger logrus.FieldLogger, instance string, change client.ChangeInfo, cloneURI *url.URL, cache *config.InRepoConfigCache) error {
+func (c *Controller) processChange(logger logrus.FieldLogger, instance string, change client.ChangeInfo, cloneURI *url.URL, cache *config.InRepoConfigCacheHandler) error {
 	baseSHA, err := c.gc.GetBranchRevision(instance, change.Project, change.Branch)
 	trimmedHostPath := cloneURI.Host + "/" + cloneURI.Path
 	if err != nil {
@@ -357,6 +460,7 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 		report bool
 	}
 	var triggeredJobs []triggeredJob
+	triggerTimes := map[string]time.Time{}
 
 	refs, err := createRefs(instance, change, cloneURI, baseSHA)
 	if err != nil {
@@ -374,17 +478,25 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 
 	switch change.Status {
 	case client.Merged:
-		postsubmits, err := cache.GetPostsubmits(trimmedHostPath, func() (string, error) { return baseSHA, nil })
-		if err != nil {
-			//TODO(mpherman): Return Error once we know this usually works
-			logger.WithError(err).Warn("Failed to get cached InRepoConfig for Postsubmits.")
-			postsubmits = append(postsubmits, c.config().PostsubmitsStatic[trimmedHostPath]...)
+		var postsubmits []config.Postsubmit
+		for attempt := 0; attempt < inRepoConfigRetries; attempt++ {
+			postsubmits, err = cache.GetPostsubmits(trimmedHostPath, func() (string, error) { return baseSHA, nil }, func() (string, error) { return change.CurrentRevision, nil })
+			// Break if there was no error, or if there was a merge conflict
+			if err == nil || strings.Contains(err.Error(), "Merge conflict in") {
+				break
+			}
+		}
+		if err := c.handleInRepoConfigError(err, instance, change); err != nil {
+			return err
 		}
 		postsubmits = append(postsubmits, c.config().PostsubmitsStatic[cloneURI.String()]...)
 		for _, postsubmit := range postsubmits {
 			if shouldRun, err := postsubmit.ShouldRun(change.Branch, changedFiles); err != nil {
 				return fmt.Errorf("failed to determine if postsubmit %q should run: %w", postsubmit.Name, err)
 			} else if shouldRun {
+				if change.Submitted != nil {
+					triggerTimes[postsubmit.Name] = change.Submitted.Time
+				}
 				jobSpecs = append(jobSpecs, jobSpec{
 					spec:   pjutil.PostsubmitSpec(postsubmit, refs),
 					labels: postsubmit.Labels,
@@ -392,11 +504,15 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 			}
 		}
 	case client.New:
-		presubmits, err := cache.GetPresubmits(trimmedHostPath, func() (string, error) { return baseSHA, nil })
-		if err != nil {
-			//TODO(mpherman): Return Error once we know this usually works
-			logger.WithError(err).Warn("Failed to get cached InRepoConfig for Presubmits.")
-			presubmits = append(presubmits, c.config().PresubmitsStatic[trimmedHostPath]...)
+		var presubmits []config.Presubmit
+		for attempt := 0; attempt < inRepoConfigRetries; attempt++ {
+			presubmits, err = cache.GetPresubmits(trimmedHostPath, func() (string, error) { return baseSHA, nil }, func() (string, error) { return change.CurrentRevision, nil })
+			if err == nil {
+				break
+			}
+		}
+		if err := c.handleInRepoConfigError(err, instance, change); err != nil {
+			return err
 		}
 		presubmits = append(presubmits, c.config().PresubmitsStatic[cloneURI.String()]...)
 
@@ -416,22 +532,28 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 		failedJobs := failedJobs(account.AccountID, revision.Number, change.Messages...)
 		failed, all := presubmitContexts(failedJobs, presubmits, logger)
 		messages := currentMessages(change, lastUpdate)
+		logger.WithField("failed", len(failed)).Debug("Failed jobs parsed from previous comments.")
 		filters := []pjutil.Filter{
-			messageFilter(messages, failed, all, logger),
+			messageFilter(messages, failed, all, triggerTimes, logger),
 		}
 		// Automatically trigger the Prow jobs if the revision is new and the
 		// change is not in WorkInProgress.
 		if revision.Created.Time.After(lastUpdate) && !change.WorkInProgress {
-			filters = append(filters, pjutil.TestAllFilter())
+			filters = append(filters, &timeAnnotationFilter{
+				Filter:       pjutil.NewTestAllFilter(),
+				eventTime:    revision.Created.Time,
+				triggerTimes: triggerTimes,
+			})
 		}
-		toTrigger, err := pjutil.FilterPresubmits(pjutil.AggregateFilter(filters), listChangedFiles(change), change.Branch, presubmits, logger)
+		toTrigger, err := pjutil.FilterPresubmits(pjutil.NewAggregateFilter(filters), listChangedFiles(change), change.Branch, presubmits, logger)
 		if err != nil {
 			return fmt.Errorf("filter presubmits: %w", err)
 		}
+		// At this point triggerTimes should be properly populated as a side effect of FilterPresubmits.
 
 		// Reply with help information to run the presubmit Prow jobs if requested.
 		for _, msg := range messages {
-			needsHelp, note := pjutil.ShouldRespondWithHelp(msg, len(toTrigger))
+			needsHelp, note := pjutil.ShouldRespondWithHelp(msg.Message, len(toTrigger))
 			// Lock for projectOptOutHelp, which is a map.
 			c.lock.RLock()
 			optedOut := isProjectOptOutHelp(c.projectsOptOutHelp, instance, change.Project)
@@ -445,6 +567,7 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 				if err := c.gc.SetReview(instance, change.ID, change.CurrentRevision, message, nil); err != nil {
 					return err
 				}
+				gerritMetrics.triggerLatency.WithLabelValues(instance).Observe(float64(time.Since(msg.Date.Time).Seconds()))
 				// Only respond to the first message that requests help information.
 				break
 			}
@@ -459,8 +582,8 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 	}
 
 	annotations := map[string]string{
-		client.GerritID:       change.ID,
-		client.GerritInstance: instance,
+		kube.GerritID:       change.ID,
+		kube.GerritInstance: instance,
 	}
 
 	for _, jSpec := range jobSpecs {
@@ -468,12 +591,12 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 		for k, v := range jSpec.labels {
 			labels[k] = v
 		}
-		labels[client.GerritRevision] = change.CurrentRevision
-		labels[client.GerritPatchset] = strconv.Itoa(change.Revisions[change.CurrentRevision].Number)
+		labels[kube.GerritRevision] = change.CurrentRevision
+		labels[kube.GerritPatchset] = strconv.Itoa(change.Revisions[change.CurrentRevision].Number)
 
-		if _, ok := labels[client.GerritReportLabel]; !ok {
-			logger.WithField("job", jSpec.spec.Job).Warn("Job uses default value of 'Code-Review' for 'prow.k8s.io/gerrit-report-label' label. This default will removed in March 2022.")
-			labels[client.GerritReportLabel] = client.CodeReview
+		if _, ok := labels[kube.GerritReportLabel]; !ok {
+			logger.WithField("job", jSpec.spec.Job).Debug("Job uses default value of 'Code-Review' for 'prow.k8s.io/gerrit-report-label' label. This default will removed in March 2022.")
+			labels[kube.GerritReportLabel] = client.CodeReview
 		}
 
 		pj := pjutil.NewProwJob(jSpec.spec, labels, annotations)
@@ -483,6 +606,9 @@ func (c *Controller) processChange(logger logrus.FieldLogger, instance string, c
 			continue
 		}
 		logger.Infof("Triggered new job")
+		if eventTime, ok := triggerTimes[pj.Spec.Job]; ok {
+			gerritMetrics.triggerLatency.WithLabelValues(instance).Observe(float64(time.Since(eventTime).Seconds()))
+		}
 		triggeredJobs = append(triggeredJobs, triggeredJob{
 			name:   jSpec.spec.Job,
 			report: jSpec.spec.Report,

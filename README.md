@@ -1,7 +1,7 @@
 # test-infra
 
 [![GoDoc](https://godoc.org/github.com/kubernetes/test-infra?status.svg)](https://godoc.org/github.com/kubernetes/test-infra)
-[![Build status](https://prow.k8s.io/badge.svg?jobs=post-test-infra-bazel)](https://testgrid.k8s.io/sig-testing-misc#post-bazel)
+[![Build status](https://prow.k8s.io/badge.svg?jobs=ci-test-infra-continuous-test)](https://testgrid.k8s.io/sig-testing-misc#continuous)
 
 This repository contains tools and configuration files for the testing and
 automation needs of the Kubernetes project.
@@ -19,7 +19,7 @@ after they have been reviewed. All job configs are located in [`config/jobs`]
 - [Add or update job configs](/config/jobs/README.md#adding-or-updating-jobs)
 - [Delete job configs](/config/jobs/README.md#deleting-jobs)
 - [Test job configs locally](/config/jobs/README.md#testing-jobs-locally)
-- [Trigger jobs on PRs using bot commmands](https://go.k8s.io/bot-commands)
+- [Trigger jobs on PRs using bot commands](https://go.k8s.io/bot-commands)
 
 ## Dashboards
 

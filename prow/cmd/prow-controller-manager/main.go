@@ -42,6 +42,8 @@ import (
 	"k8s.io/test-infra/prow/logrusutil"
 	"k8s.io/test-infra/prow/metrics"
 	"k8s.io/test-infra/prow/plank"
+
+	_ "k8s.io/test-infra/prow/version"
 )
 
 var allControllers = sets.NewString(plank.ControllerName)
@@ -151,6 +153,12 @@ func main() {
 	}
 
 	buildManagers, err := o.kubernetes.BuildClusterManagers(o.dryRun,
+		// The watch apimachinery doesn't support restarts, so just exit the
+		// binary if a build cluster can be connected later .
+		func() {
+			logrus.Info("Build cluster that failed to connect initially now worked, exiting to trigger a restart.")
+			interrupts.Terminate()
+		},
 		func(o *manager.Options) {
 			o.Namespace = cfg().PodNamespace
 		},

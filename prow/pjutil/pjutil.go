@@ -228,6 +228,7 @@ func specFromJobBase(jb config.JobBase) prowapi.ProwJobSpec {
 		RerunAuthConfig: jb.RerunAuthConfig,
 		Hidden:          jb.Hidden,
 		ProwJobDefault:  jb.ProwJobDefault,
+		JobQueueName:    jb.JobQueueName,
 	}
 }
 

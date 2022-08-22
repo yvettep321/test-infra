@@ -35,6 +35,9 @@ import (
 	_ "k8s.io/code-generator/cmd/lister-gen"
 	_ "sigs.k8s.io/controller-tools/cmd/controller-gen"
 
+	// proto generator
+	_ "github.com/golang/protobuf/protoc-gen-go"
+
 	// test runner
 	_ "gotest.tools/gotestsum"
 
@@ -45,4 +48,7 @@ import (
 
 	// image builder
 	_ "github.com/google/ko"
+
+	// caching
+	_ "github.com/sethvargo/gcs-cacher"
 )

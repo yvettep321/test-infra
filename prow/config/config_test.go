@@ -45,11 +45,9 @@ import (
 	utilpointer "k8s.io/utils/pointer"
 	"sigs.k8s.io/yaml"
 
-	"k8s.io/test-infra/pkg/genyaml"
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	prowjobv1 "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config/secret"
-	gerrit "k8s.io/test-infra/prow/gerrit/client"
 	"k8s.io/test-infra/prow/github"
 	"k8s.io/test-infra/prow/github/fakegithub"
 	"k8s.io/test-infra/prow/kube"
@@ -241,6 +239,17 @@ deck:
 `,
 			expectError: true,
 		},
+		{
+			name: "Invalid Spyglass gcs browser web prefix by bucket",
+			spyglassConfig: `
+deck:
+  spyglass:
+    gcs_browser_prefix: https://gcsweb.k8s.io/gcs/
+    gcs_browser_prefixes_by_bucket:
+      '*': https://gcsweb.k8s.io/gcs/
+`,
+			expectError: true,
+		},
 	}
 	for _, tc := range testCases {
 		// save the config
@@ -315,7 +324,7 @@ func TestGetGCSBrowserPrefix(t *testing.T) {
 		{
 			id: "only default",
 			config: Spyglass{
-				GCSBrowserPrefixes: map[string]string{
+				GCSBrowserPrefixesByRepo: map[string]string{
 					"*": "https://default.com/gcs/",
 				},
 			},
@@ -324,7 +333,8 @@ func TestGetGCSBrowserPrefix(t *testing.T) {
 		{
 			id: "org exists",
 			config: Spyglass{
-				GCSBrowserPrefixes: map[string]string{
+				GCSBrowserPrefixesByRepo: map[string]string{
+					"*":   "https://default.com/gcs/",
 					"org": "https://org.com/gcs/",
 				},
 			},
@@ -333,16 +343,46 @@ func TestGetGCSBrowserPrefix(t *testing.T) {
 		{
 			id: "repo exists",
 			config: Spyglass{
-				GCSBrowserPrefixes: map[string]string{
+				GCSBrowserPrefixesByRepo: map[string]string{
+					"*":        "https://default.com/gcs/",
+					"org":      "https://org.com/gcs/",
 					"org/repo": "https://repo.com/gcs/",
 				},
 			},
 			expected: "https://repo.com/gcs/",
 		},
+		{
+			id: "repo overrides bucket",
+			config: Spyglass{
+				GCSBrowserPrefixesByRepo: map[string]string{
+					"*":        "https://default.com/gcs/",
+					"org":      "https://org.com/gcs/",
+					"org/repo": "https://repo.com/gcs/",
+				},
+				GCSBrowserPrefixesByBucket: map[string]string{
+					"*":      "https://default.com/gcs/",
+					"bucket": "https://bucket.com/gcs/",
+				},
+			},
+			expected: "https://repo.com/gcs/",
+		},
+		{
+			id: "bucket exists",
+			config: Spyglass{
+				GCSBrowserPrefixesByRepo: map[string]string{
+					"*": "https://default.com/gcs/",
+				},
+				GCSBrowserPrefixesByBucket: map[string]string{
+					"*":      "https://default.com/gcs/",
+					"bucket": "https://bucket.com/gcs/",
+				},
+			},
+			expected: "https://bucket.com/gcs/",
+		},
 	}
 
 	for _, tc := range testCases {
-		actual := tc.config.GCSBrowserPrefixes.GetGCSBrowserPrefix("org", "repo")
+		actual := tc.config.GetGCSBrowserPrefix("org", "repo", "bucket")
 		if !reflect.DeepEqual(actual, tc.expected) {
 			t.Fatalf("%s", cmp.Diff(tc.expected, actual))
 		}
@@ -1665,7 +1705,9 @@ func TestValidateMultipleContainers(t *testing.T) {
 			},
 		},
 	}
-	ns := "target-namespace"
+	cfg := Config{
+		ProwConfig: ProwConfig{PodNamespace: "target-namespace"},
+	}
 	cases := []struct {
 		name string
 		base JobBase
@@ -1678,7 +1720,7 @@ func TestValidateMultipleContainers(t *testing.T) {
 				Agent:         ka,
 				UtilityConfig: UtilityConfig{Decorate: &yes, DecorationConfig: &defCfg},
 				Spec:          &goodSpec,
-				Namespace:     &ns,
+				Namespace:     &cfg.PodNamespace,
 			},
 			pass: true,
 		},
@@ -1698,7 +1740,7 @@ func TestValidateMultipleContainers(t *testing.T) {
 						},
 					},
 				},
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1717,7 +1759,7 @@ func TestValidateMultipleContainers(t *testing.T) {
 						},
 					},
 				},
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1726,7 +1768,7 @@ func TestValidateMultipleContainers(t *testing.T) {
 				Name:      "name",
 				Agent:     ka,
 				Spec:      &goodSpec,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1746,14 +1788,14 @@ func TestValidateMultipleContainers(t *testing.T) {
 							Args: []string{"hello", "world"},
 						},
 					},
-				}, Namespace: &ns,
+				}, Namespace: &cfg.PodNamespace,
 			},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			switch err := validateJobBase(tc.base, prowjobv1.PresubmitJob, ns); {
+			switch err := cfg.validateJobBase(tc.base, prowjobv1.PresubmitJob); {
 			case err == nil && !tc.pass:
 				t.Error("validation failed to raise an error")
 			case err != nil && tc.pass:
@@ -1771,7 +1813,12 @@ func TestValidateJobBase(t *testing.T) {
 			{},
 		},
 	}
-	ns := "target-namespace"
+	cfg := Config{
+		ProwConfig: ProwConfig{
+			Plank:        Plank{JobQueueConcurrencies: map[string]int{"queue": 0}},
+			PodNamespace: "target-namespace",
+		},
+	}
 	cases := []struct {
 		name string
 		base JobBase
@@ -1783,7 +1830,7 @@ func TestValidateJobBase(t *testing.T) {
 				Name:      "name",
 				Agent:     ka,
 				Spec:      &goodSpec,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 			pass: true,
 		},
@@ -1792,7 +1839,7 @@ func TestValidateJobBase(t *testing.T) {
 			base: JobBase{
 				Name:      "name",
 				Agent:     ja,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 			pass: true,
 		},
@@ -1803,7 +1850,7 @@ func TestValidateJobBase(t *testing.T) {
 				MaxConcurrency: -1,
 				Agent:          ka,
 				Spec:           &goodSpec,
-				Namespace:      &ns,
+				Namespace:      &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1811,7 +1858,7 @@ func TestValidateJobBase(t *testing.T) {
 			base: JobBase{
 				Name:      "name",
 				Agent:     ka,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 				Spec:      &v1.PodSpec{}, // no containers
 			},
 		},
@@ -1824,7 +1871,7 @@ func TestValidateJobBase(t *testing.T) {
 				UtilityConfig: UtilityConfig{
 					DecorationConfig: &prowjobv1.DecorationConfig{}, // missing many fields
 				},
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1836,7 +1883,7 @@ func TestValidateJobBase(t *testing.T) {
 				Labels: map[string]string{
 					"_leading_underscore": "_rejected",
 				},
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 		},
 		{
@@ -1845,7 +1892,7 @@ func TestValidateJobBase(t *testing.T) {
 				Name:      "a/b",
 				Agent:     ka,
 				Spec:      &goodSpec,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 			pass: false,
 		},
@@ -1855,7 +1902,7 @@ func TestValidateJobBase(t *testing.T) {
 				Name:      "a-b.c",
 				Agent:     ka,
 				Spec:      &goodSpec,
-				Namespace: &ns,
+				Namespace: &cfg.PodNamespace,
 			},
 			pass: true,
 		},
@@ -1869,11 +1916,27 @@ func TestValidateJobBase(t *testing.T) {
 			},
 			pass: false,
 		},
+		{
+			name: "valid job queue name",
+			base: JobBase{
+				Name:         "name",
+				JobQueueName: "queue",
+			},
+			pass: true,
+		},
+		{
+			name: "invalid job queue name",
+			base: JobBase{
+				Name:         "name",
+				JobQueueName: "invalid-queue",
+			},
+			pass: false,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			switch err := validateJobBase(tc.base, prowjobv1.PresubmitJob, ns); {
+			switch err := cfg.validateJobBase(tc.base, prowjobv1.PresubmitJob); {
 			case err == nil && !tc.pass:
 				t.Error("validation failed to raise an error")
 			case err != nil && tc.pass:
@@ -2009,7 +2072,7 @@ func TestValidateReportingWithGerritLabel(t *testing.T) {
 				Context: "context",
 			},
 			labels: map[string]string{
-				gerrit.GerritReportLabel: "label",
+				kube.GerritReportLabel: "label",
 			},
 		},
 		{
@@ -2023,21 +2086,26 @@ func TestValidateReportingWithGerritLabel(t *testing.T) {
 			name:     "no errors if job is set to skip report and Gerrit report label is empty",
 			reporter: Reporter{SkipReport: true},
 			labels: map[string]string{
-				gerrit.GerritReportLabel: "",
+				kube.GerritReportLabel: "",
 			},
 		},
 		{
 			name:     "error if job is set to skip report and Gerrit report label is set to non-empty",
 			reporter: Reporter{SkipReport: true},
 			labels: map[string]string{
-				gerrit.GerritReportLabel: "label",
+				kube.GerritReportLabel: "label",
 			},
-			expected: fmt.Errorf("Gerrit report label %s set to non-empty string but job is configured to skip reporting.", gerrit.GerritReportLabel),
+			expected: fmt.Errorf("Gerrit report label %s set to non-empty string but job is configured to skip reporting.", kube.GerritReportLabel),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				ProwConfig: ProwConfig{
+					PodNamespace: "default-namespace",
+				},
+			}
 			base := JobBase{
 				Name:   "test-job",
 				Labels: tc.labels,
@@ -2052,7 +2120,7 @@ func TestValidateReportingWithGerritLabel(t *testing.T) {
 			if tc.expected != nil {
 				expected = fmt.Errorf("invalid presubmit job %s: %w", "test-job", tc.expected)
 			}
-			if err := validatePresubmits(presubmits, "default-namespace"); !reflect.DeepEqual(err, utilerrors.NewAggregate([]error{expected})) {
+			if err := cfg.validatePresubmits(presubmits); !reflect.DeepEqual(err, utilerrors.NewAggregate([]error{expected})) {
 				t.Errorf("did not get expected validation result:\n%v", cmp.Diff(expected, err))
 			}
 
@@ -2065,7 +2133,7 @@ func TestValidateReportingWithGerritLabel(t *testing.T) {
 			if tc.expected != nil {
 				expected = fmt.Errorf("invalid postsubmit job %s: %w", "test-job", tc.expected)
 			}
-			if err := validatePostsubmits(postsubmits, "default-namespace"); !reflect.DeepEqual(err, utilerrors.NewAggregate([]error{expected})) {
+			if err := cfg.validatePostsubmits(postsubmits); !reflect.DeepEqual(err, utilerrors.NewAggregate([]error{expected})) {
 				t.Errorf("did not get expected validation result:\n%v", cmp.Diff(expected, err))
 			}
 		})
@@ -2076,7 +2144,7 @@ func TestGerritAllRepos(t *testing.T) {
 	tests := []struct {
 		name string
 		in   *GerritOrgRepoConfigs
-		want map[string][]string
+		want map[string]map[string]*GerritQueryFilter
 	}{
 		{
 			name: "multiple-org",
@@ -2090,10 +2158,7 @@ func TestGerritAllRepos(t *testing.T) {
 					Repos: []string{"repo-2"},
 				},
 			},
-			want: map[string][]string{
-				"org-1": {"repo-1"},
-				"org-2": {"repo-2"},
-			},
+			want: map[string]map[string]*GerritQueryFilter{"org-1": {"repo-1": nil}, "org-2": {"repo-2": nil}},
 		},
 		{
 			name: "org-union",
@@ -2107,9 +2172,7 @@ func TestGerritAllRepos(t *testing.T) {
 					Repos: []string{"repo-2"},
 				},
 			},
-			want: map[string][]string{
-				"org-1": {"repo-1", "repo-2"},
-			},
+			want: map[string]map[string]*GerritQueryFilter{"org-1": {"repo-1": nil, "repo-2": nil}},
 		},
 		{
 			name: "empty",
@@ -2955,6 +3018,31 @@ tide:
 			},
 		},
 		{
+			name: "tide specific pr_status_base_urls respected",
+			prowConfig: `
+tide:
+  pr_status_base_urls:
+    "*": https://star.tide.com/pr
+    "org": https://org.tide.com/pr
+    "org/repo": https://repo.tide.com/pr
+`,
+			verify: func(c *Config) error {
+				orgRepo := OrgRepo{Org: "other-org", Repo: "other-repo"}
+				if got, expected := c.Tide.GetPRStatusBaseURL(orgRepo), "https://star.tide.com/pr"; got != expected {
+					return fmt.Errorf("expected PR Status Base URL for %q to be %q, but got %q", orgRepo.String(), expected, got)
+				}
+				orgRepo = OrgRepo{Org: "org", Repo: "other-repo"}
+				if got, expected := c.Tide.GetPRStatusBaseURL(orgRepo), "https://org.tide.com/pr"; got != expected {
+					return fmt.Errorf("expected PR Status Base URL for %q to be %q, but got %q", orgRepo.String(), expected, got)
+				}
+				orgRepo = OrgRepo{Org: "org", Repo: "repo"}
+				if got, expected := c.Tide.GetPRStatusBaseURL(orgRepo), "https://repo.tide.com/pr"; got != expected {
+					return fmt.Errorf("expected PR Status Base URL for %q to be %q, but got %q", orgRepo.String(), expected, got)
+				}
+				return nil
+			},
+		},
+		{
 			name: "postsubmit without explicit 'always_run' sets this field to nil by default",
 			jobConfigs: []string{
 				`
@@ -3637,26 +3725,48 @@ func TestRerunAuthConfigsGetRerunAuthConfig(t *testing.T) {
 	var testCases = []struct {
 		name     string
 		configs  RerunAuthConfigs
-		refs     *prowapi.Refs
-		expected prowapi.RerunAuthConfig
+		jobSpec  *prowapi.ProwJobSpec
+		expected *prowapi.RerunAuthConfig
 	}{
 		{
-			name:     "default to an empty config",
-			configs:  RerunAuthConfigs{},
-			refs:     &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
-			expected: prowapi.RerunAuthConfig{},
+			name:    "default to an empty config",
+			configs: RerunAuthConfigs{},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
+			},
+			expected: nil,
 		},
 		{
-			name:     "unknown org or org/repo return wildcard",
-			configs:  RerunAuthConfigs{"*": prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}}},
-			refs:     &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
-			expected: prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+			name:    "unknown org or org/repo return wildcard",
+			configs: RerunAuthConfigs{"*": prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}}},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
 		},
 		{
-			name:     "no refs return wildcard",
-			configs:  RerunAuthConfigs{"*": prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}}},
-			refs:     nil,
-			expected: prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+			name:     "no refs return wildcard empty string match",
+			configs:  RerunAuthConfigs{"": prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}}},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+		},
+		{
+			name: "no refs return wildcard override to star match",
+			configs: RerunAuthConfigs{
+				"":      prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				"*":     prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+				"istio": prowapi.RerunAuthConfig{GitHubUsers: []string{"billybob"}},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+		},
+		{
+			name: "no refs return wildcard but there is no match",
+			configs: RerunAuthConfigs{
+				"istio": prowapi.RerunAuthConfig{GitHubUsers: []string{"billybob"}},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: nil,
 		},
 		{
 			name: "use org if defined",
@@ -3665,8 +3775,10 @@ func TestRerunAuthConfigsGetRerunAuthConfig(t *testing.T) {
 				"istio":            prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
 				"istio/test-infra": prowapi.RerunAuthConfig{GitHubUsers: []string{"billybob"}},
 			},
-			refs:     &prowapi.Refs{Org: "istio", Repo: "istio"},
-			expected: prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
 		},
 		{
 			name: "use org/repo if defined",
@@ -3674,8 +3786,10 @@ func TestRerunAuthConfigsGetRerunAuthConfig(t *testing.T) {
 				"*":           prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
 				"istio/istio": prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
 			},
-			refs:     &prowapi.Refs{Org: "istio", Repo: "istio"},
-			expected: prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
 		},
 		{
 			name: "org/repo takes precedence over org",
@@ -3684,16 +3798,336 @@ func TestRerunAuthConfigsGetRerunAuthConfig(t *testing.T) {
 				"istio":       prowapi.RerunAuthConfig{GitHubUsers: []string{"scrappydoo"}},
 				"istio/istio": prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
 			},
-			refs:     &prowapi.Refs{Org: "istio", Repo: "istio"},
-			expected: prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+		},
+		{
+			name: "use org/repo from extra refs",
+			configs: RerunAuthConfigs{
+				"*":           prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				"istio/istio": prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				ExtraRefs: []prowapi.Refs{{Org: "istio", Repo: "istio"}},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+		},
+		{
+			name: "use only org/repo from first extra refs entry",
+			configs: RerunAuthConfigs{
+				"*":                    prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				"istio/istio":          prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+				"other-org/other-repo": prowapi.RerunAuthConfig{GitHubUsers: []string{"anakin"}},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				ExtraRefs: []prowapi.Refs{{Org: "istio", Repo: "istio"}, {Org: "other-org", Repo: "other-repo"}},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			d := Deck{}
+			d.RerunAuthConfigs = tc.configs
+			err := d.FinalizeDefaultRerunAuthConfigs()
+			if err != nil {
+				t.Fatal("Failed to finalize default rerun auth config.")
+			}
 
-			if actual := tc.configs.GetRerunAuthConfig(tc.refs); !reflect.DeepEqual(actual, tc.expected) {
-				t.Errorf("Expected %v, got %v", tc.expected, actual)
+			if diff := cmp.Diff(tc.expected, d.GetRerunAuthConfig(tc.jobSpec)); diff != "" {
+				t.Errorf("GetRerunAuthConfig returned unexpected value (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestDefaultRerunAuthConfigsGetRerunAuthConfig(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		configs  []*DefaultRerunAuthConfigEntry
+		jobSpec  *prowapi.ProwJobSpec
+		expected *prowapi.RerunAuthConfig
+	}{
+		{
+			name:    "default to an empty config",
+			configs: []*DefaultRerunAuthConfigEntry{},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
+			},
+			expected: nil,
+		},
+		{
+			name: "unknown org or org/repo return wildcard",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "my-default-org", Repo: "my-default-repo"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+		},
+		{
+			name: "no refs return wildcard",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+				},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+		},
+		{
+			name: "no refs return wildcard empty string match",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+				},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"leonardo"}},
+		},
+		{
+			name: "no refs return wildcard override to star match",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+				},
+				{
+					OrgRepo: "istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+				},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+		},
+		{
+			name: "no refs return wildcard but there is no match",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"billybob"}},
+				},
+			},
+			jobSpec:  &prowapi.ProwJobSpec{},
+			expected: nil,
+		},
+		{
+			name: "use org if defined",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+				},
+				{
+					OrgRepo: "istio/test-infra",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"billybob"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"scoobydoo"}},
+		},
+		{
+			name: "use org/repo if defined",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "istio/istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+		},
+		{
+			name: "org/repo takes precedence over org",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"scrappydoo"}},
+				},
+				{
+					OrgRepo: "istio/istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs: &prowapi.Refs{Org: "istio", Repo: "istio"},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+		},
+		{
+			name: "cluster returns matching cluster",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"scrappydoo"}},
+				},
+				{
+					OrgRepo: "istio",
+					Cluster: "trusted",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs:    &prowapi.Refs{Org: "istio", Repo: "istio"},
+				Cluster: "trusted",
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+		},
+		{
+			name: "cluster returns wild card",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "istio",
+					Cluster: "*",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"scrappydoo"}},
+				},
+				{
+					OrgRepo: "istio",
+					Cluster: "cluster",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs:    &prowapi.Refs{Org: "istio", Repo: "istio"},
+				Cluster: "trusted",
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"scrappydoo"}},
+		},
+		{
+			name: "no refs with cluster returns overriding matching cluster",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "",
+					Cluster: "*",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "",
+					Cluster: "trusted",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Cluster: "trusted",
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"airbender"}},
+		},
+		{
+			name: "no matching orgrepo or cluster",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "notIstio",
+					Cluster: "notTrusted",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				Refs:    &prowapi.Refs{Org: "istio", Repo: "istio"},
+				Cluster: "trusted",
+			},
+			expected: nil,
+		},
+		{
+			name: "use org/repo from extra refs",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "istio/istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				ExtraRefs: []prowapi.Refs{{Org: "istio", Repo: "istio"}},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+		},
+		{
+			name: "use only org/repo from first extra refs entry",
+			configs: []*DefaultRerunAuthConfigEntry{
+				{
+					OrgRepo: "*",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"clarketm"}},
+				},
+				{
+					OrgRepo: "istio/istio",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+				},
+				{
+					OrgRepo: "other-org/other-repo",
+					Cluster: "",
+					Config:  &prowapi.RerunAuthConfig{GitHubUsers: []string{"anakin"}},
+				},
+			},
+			jobSpec: &prowapi.ProwJobSpec{
+				ExtraRefs: []prowapi.Refs{{Org: "istio", Repo: "istio"}, {Org: "other-org", Repo: "other-repo"}},
+			},
+			expected: &prowapi.RerunAuthConfig{GitHubUsers: []string{"skywalker"}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Deck{}
+			d.DefaultRerunAuthConfigs = tc.configs
+			err := d.FinalizeDefaultRerunAuthConfigs()
+			if err != nil {
+				t.Fatal("Failed to finalize default rerun auth config.")
+			}
+
+			if diff := cmp.Diff(tc.expected, d.GetRerunAuthConfig(tc.jobSpec)); diff != "" {
+				t.Errorf("GetRerunAuthConfig returned unexpected value (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -7348,7 +7782,7 @@ func TestValidatePresubmits(t *testing.T) {
 
 	for _, tc := range testCases {
 		var errMsg string
-		err := validatePresubmits(tc.presubmits, "")
+		err := Config{}.validatePresubmits(tc.presubmits)
 		if err != nil {
 			errMsg = err.Error()
 		}
@@ -7435,11 +7869,97 @@ func TestValidatePostsubmits(t *testing.T) {
 
 	for _, tc := range testCases {
 		var errMsg string
-		err := validatePostsubmits(tc.postsubmits, "")
+		err := Config{}.validatePostsubmits(tc.postsubmits)
 		if err != nil {
 			errMsg = err.Error()
 		}
 		if errMsg != tc.expectedError {
+			t.Errorf("expected error '%s', got error '%s'", tc.expectedError, errMsg)
+		}
+	}
+}
+
+func TestValidatePeriodics(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name          string
+		periodics     []Periodic
+		expected      []Periodic
+		expectedError string
+	}{
+		{
+			name: "Duplicate jobname causes error",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Interval: "6h"},
+				{JobBase: JobBase{Name: "a"}, Interval: "12h"},
+			},
+			expectedError: "duplicated periodic job: a",
+		},
+		{
+			name: "Mutually exclusive settings: cron, interval, and minimal_interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Interval: "6h", MinimumInterval: "6h"},
+			},
+			expectedError: "cron, interval, and minimum_interval are mutually exclusive in periodic a",
+		},
+		{
+			name: "Required settings: cron, interval, or minimal_interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}},
+			},
+			expectedError: "at least one of cron, interval, or minimum_interval must be set in periodic a",
+		},
+		{
+			name: "Invalid cron string",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Cron: "hello"},
+			},
+			expectedError: "invalid cron string hello in periodic a: Expected 5 or 6 fields, found 1: hello",
+		},
+		{
+			name: "Invalid interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Interval: "hello"},
+			},
+			expectedError: "cannot parse duration for a: time: invalid duration \"hello\"",
+		},
+		{
+			name: "Invalid minimum_interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, MinimumInterval: "hello"},
+			},
+			expectedError: "cannot parse duration for a: time: invalid duration \"hello\"",
+		},
+		{
+			name: "Sets interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Interval: "10ns"},
+			},
+			expected: []Periodic{
+				{JobBase: JobBase{Name: "a"}, Interval: "10ns", interval: time.Duration(10)},
+			},
+		},
+		{
+			name: "Sets minimum_interval",
+			periodics: []Periodic{
+				{JobBase: JobBase{Name: "a"}, MinimumInterval: "10ns"},
+			},
+			expected: []Periodic{
+				{JobBase: JobBase{Name: "a"}, MinimumInterval: "10ns", minimum_interval: time.Duration(10)},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		var errMsg string
+		err := Config{}.validatePeriodics(tc.periodics)
+		if err != nil {
+			errMsg = err.Error()
+		}
+		if len(tc.expected) > 0 && !reflect.DeepEqual(tc.periodics, tc.expected) {
+			t.Errorf("expected '%v', got '%v'", tc.expected, tc.periodics)
+		}
+		if tc.expectedError != "" && errMsg != tc.expectedError {
 			t.Errorf("expected error '%s', got error '%s'", tc.expectedError, errMsg)
 		}
 	}
@@ -7556,41 +8076,6 @@ func loadConfigYaml(prowConfigYaml string, t *testing.T, supplementalProwConfigs
 	return Load(prowConfig, "", supplementalProwConfigDirs, "_prowconfig.yaml")
 }
 
-func TestGenYamlDocs(t *testing.T) {
-	t.Parallel()
-	const fixtureName = "./prow-config-documented.yaml"
-	inputFiles, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatalf("filepath.Glob: %v", err)
-	}
-	prowapiInputFiles, err := filepath.Glob("../apis/prowjobs/v1/*.go")
-	if err != nil {
-		t.Fatalf("prowapi filepath.Glob: %v", err)
-	}
-	inputFiles = append(inputFiles, prowapiInputFiles...)
-
-	commentMap, err := genyaml.NewCommentMap(inputFiles...)
-	if err != nil {
-		t.Fatalf("failed to construct commentMap: %v", err)
-	}
-	actualYaml, err := commentMap.GenYaml(genyaml.PopulateStruct(&ProwConfig{}))
-	if err != nil {
-		t.Fatalf("genyaml errored: %v", err)
-	}
-	if os.Getenv("UPDATE") != "" {
-		if err := ioutil.WriteFile(fixtureName, []byte(actualYaml), 0644); err != nil {
-			t.Fatalf("failed to write fixture: %v", err)
-		}
-	}
-	expectedYaml, err := ioutil.ReadFile(fixtureName)
-	if err != nil {
-		t.Fatalf("failed to read fixture: %v", err)
-	}
-	if diff := cmp.Diff(actualYaml, string(expectedYaml)); diff != "" {
-		t.Errorf("Actual result differs from expected: %s\nIf this is expected, re-run the tests with the UPDATE env var set to update the fixture:\n\tUPDATE=true go test ./prow/config/... -run TestGenYamlDocs", diff)
-	}
-}
-
 func TestProwConfigMerging(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
@@ -7614,6 +8099,8 @@ config_version_sha: abc
 deck:
   spyglass:
     gcs_browser_prefixes:
+      '*': ""
+    gcs_browser_prefixes_by_bucket:
       '*': ""
     size_limit: 100000000
   tide_update_period: 10s
@@ -7693,6 +8180,8 @@ deck:
   spyglass:
     gcs_browser_prefixes:
       '*': ""
+    gcs_browser_prefixes_by_bucket:
+      '*': ""
     size_limit: 100000000
   tide_update_period: 10s
 default_job_timeout: 24h0m0s
@@ -7763,6 +8252,8 @@ tide:
 deck:
   spyglass:
     gcs_browser_prefixes:
+      '*': ""
+    gcs_browser_prefixes_by_bucket:
       '*': ""
     size_limit: 100000000
   tide_update_period: 10s
@@ -8023,7 +8514,7 @@ func TestHasConfigFor(t *testing.T) {
 			name: "Any config that is empty except for tide.merge_method is considered to be for those orgs or repos",
 			resultGenerator: func(fuzzedConfig *ProwConfig) (toCheck *ProwConfig, exceptGlobal bool, expectOrgs sets.String, expectRepos sets.String) {
 				expectOrgs, expectRepos = sets.String{}, sets.String{}
-				result := &ProwConfig{Tide: Tide{MergeType: fuzzedConfig.Tide.MergeType}}
+				result := &ProwConfig{Tide: Tide{TideGitHubConfig: TideGitHubConfig{MergeType: fuzzedConfig.Tide.MergeType}}}
 				for orgOrRepo := range result.Tide.MergeType {
 					if strings.Contains(orgOrRepo, "/") {
 						expectRepos.Insert(orgOrRepo)
@@ -8039,7 +8530,7 @@ func TestHasConfigFor(t *testing.T) {
 			name: "Any config that is empty except for tide.queries is considered to be for those orgs or repos",
 			resultGenerator: func(fuzzedConfig *ProwConfig) (toCheck *ProwConfig, exceptGlobal bool, expectOrgs sets.String, expectRepos sets.String) {
 				expectOrgs, expectRepos = sets.String{}, sets.String{}
-				result := &ProwConfig{Tide: Tide{Queries: fuzzedConfig.Tide.Queries}}
+				result := &ProwConfig{Tide: Tide{TideGitHubConfig: TideGitHubConfig{Queries: fuzzedConfig.Tide.Queries}}}
 				for _, query := range result.Tide.Queries {
 					expectOrgs.Insert(query.Orgs...)
 					expectRepos.Insert(query.Repos...)
@@ -8167,13 +8658,13 @@ func TestProwConfigMergingProperties(t *testing.T) {
 		{
 			name: "Tide merge method",
 			makeMergeable: func(pc *ProwConfig) {
-				*pc = ProwConfig{Tide: Tide{MergeType: pc.Tide.MergeType}}
+				*pc = ProwConfig{Tide: Tide{TideGitHubConfig: TideGitHubConfig{MergeType: pc.Tide.MergeType}}}
 			},
 		},
 		{
 			name: "Tide queries",
 			makeMergeable: func(pc *ProwConfig) {
-				*pc = ProwConfig{Tide: Tide{Queries: pc.Tide.Queries}}
+				*pc = ProwConfig{Tide: Tide{TideGitHubConfig: TideGitHubConfig{Queries: pc.Tide.Queries}}}
 			},
 		},
 	}

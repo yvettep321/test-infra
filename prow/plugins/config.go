@@ -192,10 +192,6 @@ type Owners struct {
 	// This check is performed by the verify-owners plugin.
 	LabelsDenyList []string `json:"labels_denylist,omitempty"`
 
-	// LabelsBlackList will be removed after October 2021, use
-	// labels_denylist instead
-	LabelsBlackList []string `json:"labels_blacklist,omitempty"`
-
 	// Filenames allows configuring repos to use a separate set of filenames for
 	// any plugin that interacts with these files. Keys are in "org/repo" format.
 	Filenames map[string]ownersconfig.Filenames `json:"filenames,omitempty"`
@@ -661,6 +657,9 @@ type Welcome struct {
 	// MessageTemplate is the welcome message template to post on new-contributor PRs
 	// For the info struct see prow/plugins/welcome/welcome.go's PRInfo
 	MessageTemplate string `json:"message_template,omitempty"`
+	// Post welcome message in all cases, even if PR author is not an existing
+	// contributor or part of the organization
+	AlwaysPost bool `json:"always_post,omitempty"`
 }
 
 // Dco is config for the DCO (https://developercertificate.org/) checker plugin.
@@ -1016,11 +1015,7 @@ func (c *Configuration) setDefaults() {
 		c.SigMention.Regexp = `(?m)@kubernetes/sig-([\w-]*)-(misc|test-failures|bugs|feature-requests|proposals|pr-reviews|api-reviews)`
 	}
 	if c.Owners.LabelsDenyList == nil {
-		if c.Owners.LabelsBlackList != nil {
-			c.Owners.LabelsDenyList = c.Owners.LabelsBlackList
-		} else {
-			c.Owners.LabelsDenyList = []string{labels.Approved, labels.LGTM}
-		}
+		c.Owners.LabelsDenyList = []string{labels.Approved, labels.LGTM}
 	}
 	for _, milestone := range c.RepoMilestone {
 		if milestone.MaintainersFriendlyName == "" {
@@ -1297,9 +1292,6 @@ func (c *Configuration) Validate() error {
 		logrus.Warn("no plugins specified-- check syntax?")
 	}
 
-	if c.Owners.LabelsBlackList != nil && c.Owners.LabelsDenyList != nil {
-		return errors.New("labels_blacklist and labels_denylist cannot be both supplied")
-	}
 	// Defaulting should run before validation.
 	c.setDefaults()
 	// Regexp compilation should run after defaulting, but before validation.
@@ -1875,7 +1867,12 @@ type Override struct {
 
 func (c *Configuration) mergeFrom(other *Configuration) error {
 	var errs []error
-	if diff := cmp.Diff(other, &Configuration{Approve: other.Approve, Bugzilla: other.Bugzilla, ExternalPlugins: other.ExternalPlugins, Label: Label{RestrictedLabels: other.Label.RestrictedLabels}, Lgtm: other.Lgtm, Plugins: other.Plugins}); diff != "" {
+
+	diff := cmp.Diff(other, &Configuration{Approve: other.Approve, Bugzilla: other.Bugzilla,
+		ExternalPlugins: other.ExternalPlugins, Label: Label{RestrictedLabels: other.Label.RestrictedLabels},
+		Lgtm: other.Lgtm, Plugins: other.Plugins, Triggers: other.Triggers, Welcome: other.Welcome})
+
+	if diff != "" {
 		errs = append(errs, fmt.Errorf("supplemental plugin configuration has config that doesn't support merging: %s", diff))
 	}
 
@@ -1892,6 +1889,8 @@ func (c *Configuration) mergeFrom(other *Configuration) error {
 
 	c.Approve = append(c.Approve, other.Approve...)
 	c.Lgtm = append(c.Lgtm, other.Lgtm...)
+	c.Triggers = append(c.Triggers, other.Triggers...)
+	c.Welcome = append(c.Welcome, other.Welcome...)
 
 	if err := c.mergeExternalPluginsFrom(other.ExternalPlugins); err != nil {
 		errs = append(errs, fmt.Errorf("failed to merge .external-plugins from supplemental config: %w", err))
@@ -2020,7 +2019,12 @@ func getLabelConfigFromRestrictedLabelsSlice(s []RestrictedLabel, label string) 
 }
 
 func (c *Configuration) HasConfigFor() (global bool, orgs sets.String, repos sets.String) {
-	if !reflect.DeepEqual(c, &Configuration{Approve: c.Approve, Bugzilla: c.Bugzilla, ExternalPlugins: c.ExternalPlugins, Label: Label{RestrictedLabels: c.Label.RestrictedLabels}, Lgtm: c.Lgtm, Plugins: c.Plugins}) || c.Bugzilla.Default != nil {
+	equals := reflect.DeepEqual(c,
+		&Configuration{Approve: c.Approve, Bugzilla: c.Bugzilla, ExternalPlugins: c.ExternalPlugins,
+			Label: Label{RestrictedLabels: c.Label.RestrictedLabels}, Lgtm: c.Lgtm, Plugins: c.Plugins,
+			Triggers: c.Triggers, Welcome: c.Welcome})
+
+	if !equals || c.Bugzilla.Default != nil {
 		global = true
 	}
 	orgs = sets.String{}
@@ -2067,6 +2071,26 @@ func (c *Configuration) HasConfigFor() (global bool, orgs sets.String, repos set
 
 	for _, lgtm := range c.Lgtm {
 		for _, orgOrRepo := range lgtm.Repos {
+			if strings.Contains(orgOrRepo, "/") {
+				repos.Insert(orgOrRepo)
+			} else {
+				orgs.Insert(orgOrRepo)
+			}
+		}
+	}
+
+	for _, trigger := range c.Triggers {
+		for _, orgOrRepo := range trigger.Repos {
+			if strings.Contains(orgOrRepo, "/") {
+				repos.Insert(orgOrRepo)
+			} else {
+				orgs.Insert(orgOrRepo)
+			}
+		}
+	}
+
+	for _, welcome := range c.Welcome {
+		for _, orgOrRepo := range welcome.Repos {
 			if strings.Contains(orgOrRepo, "/") {
 				repos.Insert(orgOrRepo)
 			} else {

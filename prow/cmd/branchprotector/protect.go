@@ -47,10 +47,6 @@ type options struct {
 	confirm            bool
 	verifyRestrictions bool
 
-	// TODO(petr-muller): Remove after August 2021, replaced by github.ThrottleHourlyTokens
-	tokens     int
-	tokenBurst int
-
 	github           flagutil.GitHubOptions
 	githubEnablement flagutil.GitHubEnablementOptions
 }
@@ -68,21 +64,6 @@ func (o *options) Validate() error {
 		return err
 	}
 
-	if o.tokens != defaultTokens {
-		if o.github.ThrottleHourlyTokens != defaultTokens {
-			return fmt.Errorf("--tokens cannot be specified together with --github-hourly-tokens: use just the latter")
-		}
-		logrus.Warn("--tokens is deprecated: use --github-hourly-tokens instead")
-		o.github.ThrottleHourlyTokens = o.tokens
-	}
-	if o.tokenBurst != defaultBurst {
-		if o.github.ThrottleAllowBurst != defaultBurst {
-			return fmt.Errorf("--token-burst cannot be specified together with --github-allowed-burst: use just the latter")
-		}
-		logrus.Warn("--token-burst is deprecated: use --github-allowed-burst instead")
-		o.github.ThrottleAllowBurst = o.tokenBurst
-	}
-
 	return nil
 }
 
@@ -91,8 +72,6 @@ func gatherOptions() options {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.BoolVar(&o.confirm, "confirm", false, "Mutate github if set")
 	fs.BoolVar(&o.verifyRestrictions, "verify-restrictions", false, "Verify the restrictions section of the request for authorized collaborators/teams")
-	fs.IntVar(&o.tokens, "tokens", defaultTokens, "Throttle hourly token consumption (0 to disable) DEPRECATED: use --github-hourly-tokens")
-	fs.IntVar(&o.tokenBurst, "token-burst", defaultBurst, "Allow consuming a subset of hourly tokens in a short burst. DEPRECATED: use --github-allowed-burst")
 	o.config.AddFlags(fs)
 	o.github.AddCustomizedFlags(fs, flagutil.ThrottlerDefaults(defaultTokens, defaultBurst))
 	o.githubEnablement.AddFlags(fs)
@@ -204,7 +183,7 @@ func (p *protector) configureBranches() {
 // protect protects branches specified in the presubmit and branch-protection config sections.
 func (p *protector) protect() {
 	bp := p.cfg.BranchProtection
-	if bp.Policy.Unmanaged != nil && *bp.Policy.Unmanaged {
+	if bp.Policy.Unmanaged != nil && *bp.Policy.Unmanaged && !bp.HasManagedOrgs() && !bp.HasManagedRepos() && !bp.HasManagedBranches() {
 		logrus.Warn("Branchprotection has global unmanaged: true, will not do anything")
 		return
 	}
@@ -252,7 +231,7 @@ func (p *protector) protect() {
 
 // UpdateOrg updates all repos in the org with the specified defaults
 func (p *protector) UpdateOrg(orgName string, org config.Org) error {
-	if org.Policy.Unmanaged != nil && *org.Policy.Unmanaged {
+	if org.Policy.Unmanaged != nil && *org.Policy.Unmanaged && !org.HasManagedRepos() && !org.HasManagedBranches() {
 		return nil
 	}
 
@@ -298,7 +277,7 @@ func (p *protector) UpdateOrg(orgName string, org config.Org) error {
 // UpdateRepo updates all branches in the repo with the specified defaults
 func (p *protector) UpdateRepo(orgName string, repoName string, repo config.Repo) error {
 	p.completedRepos[orgName+"/"+repoName] = true
-	if repo.Policy.Unmanaged != nil && *repo.Policy.Unmanaged {
+	if repo.Policy.Unmanaged != nil && *repo.Policy.Unmanaged && !repo.HasManagedBranches() {
 		return nil
 	}
 
@@ -435,7 +414,7 @@ func (p *protector) UpdateBranch(orgName, repo string, branchName string, branch
 	if branch.Unmanaged != nil && *branch.Unmanaged {
 		return nil
 	}
-	bp, err := p.cfg.GetPolicy(orgName, repo, branchName, branch, p.cfg.PresubmitsStatic[orgName+"/"+repo])
+	bp, err := p.cfg.GetPolicy(orgName, repo, branchName, branch, p.cfg.PresubmitsStatic[orgName+"/"+repo], &protected)
 	if err != nil {
 		return fmt.Errorf("get policy: %w", err)
 	}
@@ -498,7 +477,10 @@ func equalBranchProtections(state *github.BranchProtection, request *github.Bran
 		return equalRequiredStatusChecks(state.RequiredStatusChecks, request.RequiredStatusChecks) &&
 			equalAdminEnforcement(state.EnforceAdmins, request.EnforceAdmins) &&
 			equalRequiredPullRequestReviews(state.RequiredPullRequestReviews, request.RequiredPullRequestReviews) &&
-			equalRestrictions(state.Restrictions, request.Restrictions)
+			equalRestrictions(state.Restrictions, request.Restrictions) &&
+			equalAllowForcePushes(state.AllowForcePushes, request.AllowForcePushes) &&
+			equalRequiredLinearHistory(state.RequiredLinearHistory, request.RequiredLinearHistory) &&
+			equalAllowDeletions(state.AllowDeletions, request.AllowDeletions)
 	default:
 		return false
 	}
@@ -535,6 +517,18 @@ func equalStringSlices(s1, s2 *[]string) bool {
 	default:
 		return false
 	}
+}
+
+func equalRequiredLinearHistory(state github.RequiredLinearHistory, request bool) bool {
+	return state.Enabled == request
+}
+
+func equalAllowDeletions(state github.AllowDeletions, request bool) bool {
+	return state.Enabled == request
+}
+
+func equalAllowForcePushes(state github.AllowForcePushes, request bool) bool {
+	return state.Enabled == request
 }
 
 func equalAdminEnforcement(state github.EnforceAdmins, request *bool) bool {

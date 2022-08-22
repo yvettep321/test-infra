@@ -80,6 +80,10 @@ ensure-in-gopath() {
   cd "$fake_repopath"
 }
 
+gen-prow-config-documented() {
+  go run ./hack/gen-prow-documented
+}
+
 # copyfiles will copy all files in 'path' in the fake gopath over to the
 # workspace directory as the code generators output directly into GOPATH,
 # meaning without this function the generated files are left in /tmp
@@ -224,10 +228,7 @@ EOF
   unset HOME
 }
 
-gen-ts-bundle() {
-  ./hack/make-rules/update/ts-rollup.sh prow/cmd/deck/.ts-packages
-  ./hack/make-rules/update/ts-rollup.sh gopherage/.ts-packages
-}
+gen-prow-config-documented
 
 export GO111MODULE=off
 ensure-in-gopath
@@ -247,5 +248,3 @@ gen-informer
 gen-spyglass-bindata
 gen-prowjob-crd
 export GO111MODULE=on
-
-gen-ts-bundle

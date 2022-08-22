@@ -1,6 +1,6 @@
 periodics:
 - annotations:
-    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
+    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com, sig-windows-leads@kubernetes.io
     testgrid-dashboards: sig-release-1.23-informing, sig-windows-signal, sig-windows-1.23-release
     testgrid-tab-name: aks-engine-windows-containerd-1.23
   decorate: true
@@ -11,7 +11,7 @@ periodics:
     org: kubernetes
     path_alias: k8s.io/kubernetes
     repo: kubernetes
-  interval: 24h
+  interval: 3h
   labels:
     preset-azure-cred: "true"
     preset-azure-windows: "true"
@@ -49,7 +49,7 @@ periodics:
       command:
       - runner.sh
       - kubetest
-      image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+      image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
       name: ""
       resources: {}
       securityContext:
@@ -73,7 +73,7 @@ periodics:
     path_alias: k8s.io/kubernetes
   spec:
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
       command:
       - runner.sh
       - kubetest
@@ -106,9 +106,9 @@ periodics:
   annotations:
     testgrid-dashboards: sig-windows-1.23-release
     testgrid-tab-name: aks-engine-windows-containerd-serial-slow-1.23
-    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
+    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com, sig-windows-leads@kubernetes.io
     description: Runs SIG-Windows release serial tests on K8s 1.23 clusters provided by aks-engine (https://github.com/Azure/aks-engine) on Azure cloud
-- interval: 24h
+- interval: 3h
   name: ci-kubernetes-e2e-aks-engine-azure-1-23-windows
   decorate: true
   decoration_config:
@@ -128,7 +128,7 @@ periodics:
     path_alias: k8s.io/kubernetes
   spec:
     containers:
-    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.23
+    - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.23
       command:
       - runner.sh
       - kubetest
@@ -161,5 +161,5 @@ periodics:
   annotations:
     testgrid-dashboards: sig-windows-1.23-release
     testgrid-tab-name: aks-engine-windows-dockershim-1.23
-    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com
+    testgrid-alert-email: kubernetes-provider-azure@googlegroups.com, sig-windows-leads@kubernetes.io
     description: Runs SIG-Windows release tests on K8s 1.23 clusters provided by aks-engine (https://github.com/Azure/aks-engine) on Azure cloud

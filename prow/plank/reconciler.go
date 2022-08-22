@@ -32,9 +32,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/clock"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -154,7 +154,7 @@ type reconciler struct {
 	config             config.Getter
 	opener             io.Opener
 	totURL             string
-	clock              clock.Clock
+	clock              clock.WithTickerAndDelayedExecution
 	serializationLocks *shardedLock
 }
 
@@ -186,7 +186,6 @@ func (r *reconciler) syncMetrics(ctx context.Context) error {
 				continue
 			}
 			kube.GatherProwJobMetrics(r.log, pjs.Items)
-			version.GatherProwVersion(r.log)
 		}
 	}
 }
@@ -343,7 +342,7 @@ func (r *reconciler) syncPendingJob(ctx context.Context, pj *prowv1.ProwJob) (*r
 		id, pn, err := r.startPod(ctx, pj)
 		if err != nil {
 			if !isRequestError(err) {
-				return nil, fmt.Errorf("error starting pod %s: %w", pod.Name, err)
+				return nil, fmt.Errorf("error starting pod for PJ %s: %w", pj.Name, err)
 			}
 			pj.Status.State = prowv1.ErrorState
 			pj.SetComplete()
@@ -772,6 +771,14 @@ func (r *reconciler) canExecuteConcurrently(ctx context.Context, pj *prowv1.Prow
 		}
 	}
 
+	if canExecute, err := r.canExecuteConcurrentlyPerJob(ctx, pj); err != nil || !canExecute {
+		return canExecute, err
+	}
+
+	return r.canExecuteConcurrentlyPerQueue(ctx, pj)
+}
+
+func (r *reconciler) canExecuteConcurrentlyPerJob(ctx context.Context, pj *prowv1.ProwJob) (bool, error) {
 	if pj.Spec.MaxConcurrency == 0 {
 		return true, nil
 	}
@@ -782,29 +789,42 @@ func (r *reconciler) canExecuteConcurrently(ctx context.Context, pj *prowv1.Prow
 	}
 	r.log.Infof("got %d not completed with same name", len(pjs.Items))
 
-	var pendingOrOlderMatchingPJs int
-	for _, foundPJ := range pjs.Items {
-		// Ignore self here.
-		if foundPJ.UID == pj.UID {
-			continue
-		}
-		if foundPJ.Status.State == prowv1.PendingState {
-			pendingOrOlderMatchingPJs++
-			continue
-		}
-
-		// At this point we know that foundPJ is in Triggered state, if its older than our prowJobs it gets
-		// priorized to make sure we execute jobs in creation order.
-		if foundPJ.CreationTimestamp.Before(&pj.CreationTimestamp) {
-			pendingOrOlderMatchingPJs++
-		}
-
-	}
-
+	pendingOrOlderMatchingPJs := countPendingOrOlderTriggeredMatchingPJs(*pj, pjs.Items)
 	if pendingOrOlderMatchingPJs >= pj.Spec.MaxConcurrency {
 		r.log.WithFields(pjutil.ProwJobFields(pj)).
 			Debugf("Not starting another instance of %s, have %d instances that are pending or older, %d is the limit",
 				pj.Spec.Job, pendingOrOlderMatchingPJs, pj.Spec.MaxConcurrency)
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (r *reconciler) canExecuteConcurrentlyPerQueue(ctx context.Context, pj *prowv1.ProwJob) (bool, error) {
+	queueName := pj.Spec.JobQueueName
+	if queueName == "" {
+		return true, nil
+	}
+
+	queueConcurrency, queueDefined := r.config().Plank.JobQueueConcurrencies[queueName]
+	if !queueDefined {
+		return false, fmt.Errorf("failed to match queue name '%s' with Plank configuration", queueName)
+	}
+	if queueConcurrency == 0 {
+		return true, nil
+	}
+
+	pjs := &prowv1.ProwJobList{}
+	if err := r.pjClient.List(ctx, pjs, optPendingTriggeredJobsInQueue(queueName)); err != nil {
+		return false, fmt.Errorf("failed listing prowjobs in queue %s: %w", queueName, err)
+	}
+	r.log.Infof("got %d not completed within queue %s", len(pjs.Items), queueName)
+
+	pendingOrOlderMatchingPJs := countPendingOrOlderTriggeredMatchingPJs(*pj, pjs.Items)
+	if pendingOrOlderMatchingPJs >= queueConcurrency {
+		r.log.WithFields(pjutil.ProwJobFields(pj)).
+			Debugf("Not starting another instance of %s, have %d instances in queue %s that are pending or older, %d is the limit",
+				pj.Spec.Job, pendingOrOlderMatchingPJs, queueName, queueConcurrency)
 		return false, nil
 	}
 
@@ -869,6 +889,10 @@ func pendingTriggeredIndexKeyByName(jobName string) string {
 	return fmt.Sprintf("pending-triggered-named-%s", jobName)
 }
 
+func pendingTriggeredIndexKeyByJobQueueName(jobQueueName string) string {
+	return fmt.Sprintf("pending-triggered-with-job-queue-name-%s", jobQueueName)
+}
+
 func prowJobIndexer(prowJobNamespace string) ctrlruntimeclient.IndexerFunc {
 	return func(o ctrlruntimeclient.Object) []string {
 		pj := o.(*prowv1.ProwJob)
@@ -876,22 +900,21 @@ func prowJobIndexer(prowJobNamespace string) ctrlruntimeclient.IndexerFunc {
 			return nil
 		}
 
+		indexes := []string{prowJobIndexKeyAll}
+
 		if pj.Status.State == prowv1.PendingState {
-			return []string{
-				prowJobIndexKeyAll,
-				prowJobIndexKeyPending,
-				pendingTriggeredIndexKeyByName(pj.Spec.Job),
+			indexes = append(indexes, prowJobIndexKeyPending)
+		}
+
+		if pj.Status.State == prowv1.PendingState || pj.Status.State == prowv1.TriggeredState {
+			indexes = append(indexes, pendingTriggeredIndexKeyByName(pj.Spec.Job))
+
+			if pj.Spec.JobQueueName != "" {
+				indexes = append(indexes, pendingTriggeredIndexKeyByJobQueueName(pj.Spec.JobQueueName))
 			}
 		}
 
-		if pj.Status.State == prowv1.TriggeredState {
-			return []string{
-				prowJobIndexKeyAll,
-				pendingTriggeredIndexKeyByName(pj.Spec.Job),
-			}
-		}
-
-		return []string{prowJobIndexKeyAll}
+		return indexes
 	}
 }
 
@@ -905,6 +928,10 @@ func optPendingProwJobs() ctrlruntimeclient.ListOption {
 
 func optPendingTriggeredJobsNamed(name string) ctrlruntimeclient.ListOption {
 	return ctrlruntimeclient.MatchingFields{prowJobIndexName: pendingTriggeredIndexKeyByName(name)}
+}
+
+func optPendingTriggeredJobsInQueue(queueName string) ctrlruntimeclient.ListOption {
+	return ctrlruntimeclient.MatchingFields{prowJobIndexName: pendingTriggeredIndexKeyByJobQueueName(queueName)}
 }
 
 func didPodSucceed(p *corev1.Pod) bool {
@@ -944,4 +971,28 @@ func isRequestError(err error) bool {
 		code = status.Status().Code
 	}
 	return 400 <= code && code < 500
+}
+
+func countPendingOrOlderTriggeredMatchingPJs(pj prowv1.ProwJob, pjs []prowv1.ProwJob) int {
+	var pendingOrOlderTriggeredMatchingPJs int
+
+	for _, foundPJ := range pjs {
+		// Ignore self here.
+		if foundPJ.UID == pj.UID {
+			continue
+		}
+		if foundPJ.Status.State == prowv1.PendingState {
+			pendingOrOlderTriggeredMatchingPJs++
+			continue
+		}
+
+		// At this point if foundPJ is older than our prowJobs it gets
+		// priorized to make sure we execute jobs in creation order.
+		if foundPJ.Status.State == prowv1.TriggeredState &&
+			foundPJ.CreationTimestamp.Before(&pj.CreationTimestamp) {
+			pendingOrOlderTriggeredMatchingPJs++
+		}
+	}
+
+	return pendingOrOlderTriggeredMatchingPJs
 }

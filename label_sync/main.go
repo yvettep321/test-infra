@@ -418,7 +418,7 @@ func loadLabels(gc client, org string, repos []string) (*RepoLabels, error) {
 				logrus.WithField("org", org).WithField("repo", repository).Info("Listing labels for repo")
 				repoLabels, err := gc.GetRepoLabels(org, repository)
 				if err != nil {
-					logrus.WithField("org", org).WithField("repo", repository).Error("Failed listing labels for repo")
+					logrus.WithField("org", org).WithField("repo", repository).WithError(err).Error("Failed listing labels for repo")
 					errChan <- err
 				}
 				labels <- RepoLabels{repository: repoLabels}
@@ -656,7 +656,7 @@ func (ru RepoUpdates) DoUpdates(org string, gc client) error {
 						errChan <- err
 					}
 				case "migrate":
-					issues, err := gc.FindIssues(fmt.Sprintf("is:open repo:%s/%s label:\"%s\" -label:\"%s\"", org, repo, update.Current.Name, update.Wanted.Name), "", false)
+					issues, err := gc.FindIssuesWithOrg(org, fmt.Sprintf("is:open repo:%s/%s label:\"%s\" -label:\"%s\"", org, repo, update.Current.Name, update.Wanted.Name), "", false)
 					if err != nil {
 						errChan <- err
 					}
@@ -702,7 +702,7 @@ type client interface {
 	DeleteRepoLabel(org, repo, label string) error
 	AddLabel(org, repo string, number int, label string) error
 	RemoveLabel(org, repo string, number int, label string) error
-	FindIssues(query, order string, ascending bool) ([]github.Issue, error)
+	FindIssuesWithOrg(org, query, sort string, asc bool) ([]github.Issue, error)
 	GetRepos(org string, isUser bool) ([]github.Repo, error)
 	GetRepoLabels(string, string) ([]github.Label, error)
 	SetMax404Retries(int)
@@ -718,9 +718,12 @@ func newClient(tokenPath string, tokens, tokenBurst int, dryRun bool, graphqlEnd
 	}
 
 	if dryRun {
-		return github.NewDryRunClient(secret.GetTokenGenerator(tokenPath), secret.Censor, graphqlEndpoint, hosts...), nil
+		return github.NewDryRunClient(secret.GetTokenGenerator(tokenPath), secret.Censor, graphqlEndpoint, hosts...)
 	}
-	c := github.NewClient(secret.GetTokenGenerator(tokenPath), secret.Censor, graphqlEndpoint, hosts...)
+	c, err := github.NewClient(secret.GetTokenGenerator(tokenPath), secret.Censor, graphqlEndpoint, hosts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to construct github client: %v", err)
+	}
 	if tokens > 0 && tokenBurst >= tokens {
 		return nil, fmt.Errorf("--tokens=%d must exceed --token-burst=%d", tokens, tokenBurst)
 	}
@@ -774,7 +777,10 @@ func main() {
 		if deprecated {
 			githubClient, err = newClient(o.token, o.tokens, o.tokenBurst, !o.confirm, o.graphqlEndpoint, o.endpoint.Strings()...)
 		} else {
-			githubClient, err = o.github.GitHubClient(!o.confirm)
+			err = o.github.Validate(!o.confirm)
+			if err == nil {
+				githubClient, err = o.github.GitHubClient(!o.confirm)
+			}
 		}
 
 		if err != nil {

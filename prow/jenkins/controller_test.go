@@ -31,8 +31,9 @@ import (
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/test-infra/prow/client/clientset/versioned/fake"
+	"k8s.io/utils/clock"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	prowapi "k8s.io/test-infra/prow/apis/prowjobs/v1"
 	"k8s.io/test-infra/prow/config"
@@ -193,7 +194,7 @@ func (f *fghc) ListCommitCommentsWithContext(_ context.Context, org, repo, SHA s
 }
 
 func TestSyncTriggeredJobs(t *testing.T) {
-	fakeClock := clock.NewFakeClock(time.Now().Truncate(1 * time.Second))
+	fakeClock := clocktesting.NewFakeClock(time.Now().Truncate(1 * time.Second))
 	pendingTime := metav1.NewTime(fakeClock.Now())
 
 	var testcases = []struct {

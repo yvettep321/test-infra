@@ -20,7 +20,7 @@ presubmits:
       preset-windows-private-registry-cred: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
         command:
         - runner.sh
         - kubetest
@@ -42,7 +42,7 @@ presubmits:
         - --aksengine-private-key=$(K8S_SSH_PRIVATE_KEY_PATH)
         - --aksengine-winZipBuildScript=$(WIN_BUILD)
         - --aksengine-orchestratorRelease=1.22
-        - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/windows-testing/master/job-templates/kubernetes_release_staging.json
+        - --aksengine-template-url=https://raw.githubusercontent.com/kubernetes-sigs/windows-testing/master/job-templates/kubernetes_release_1_22.json
         - --aksengine-win-binaries
         - --aksengine-deploy-custom-k8s
         - --aksengine-agentpoolcount=2
@@ -75,7 +75,7 @@ presubmits:
       preset-windows-private-registry-cred: "true"
     spec:
       containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
         command:
         - runner.sh
         - kubetest
@@ -133,7 +133,7 @@ presubmits:
       path_alias: sigs.k8s.io/azuredisk-csi-driver
     spec:
       containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-1.22
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-1.22
         command:
         - runner.sh
         - kubetest
@@ -165,7 +165,7 @@ presubmits:
           privileged: true
         env:
         - name: AZURE_STORAGE_DRIVER
-          value: kubernetes.io/azure-disk # In-tree Azure disk storage class
+          value: "kubernetes.io/azure-disk" # In-tree Azure disk storage class
         - name: TEST_WINDOWS
           value: "true"
     annotations:
@@ -195,7 +195,7 @@ presubmits:
       path_alias: sigs.k8s.io/azurefile-csi-driver
     spec:
       containers:
-      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220124-681f3531ec-master
+      - image: gcr.io/k8s-staging-test-infra/kubekins-e2e:v20220812-a0f1ed2b84-master
         command:
         - runner.sh
         - kubetest
@@ -227,7 +227,7 @@ presubmits:
           privileged: true
         env:
         - name: AZURE_STORAGE_DRIVER
-          value: kubernetes.io/azure-file # In-tree Azure file storage class
+          value: "kubernetes.io/azure-file" # In-tree Azure file storage class
         - name: TEST_WINDOWS
           value: "true"
     annotations:

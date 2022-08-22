@@ -48,6 +48,8 @@ import (
 	"k8s.io/test-infra/prow/plugins/ownersconfig"
 	"k8s.io/test-infra/prow/repoowners"
 	"k8s.io/test-infra/prow/slack"
+
+	_ "k8s.io/test-infra/prow/version"
 )
 
 const (
@@ -210,17 +212,8 @@ func main() {
 		// OwnersDirDenylist struct contains some defaults that's required by all
 		// repos, so this function cannot return nil
 		res := &config.OwnersDirDenylist{}
-		deprecated := configAgent.Config().OwnersDirBlacklist
 		if l := configAgent.Config().OwnersDirDenylist; l != nil {
 			res = l
-		}
-		if deprecated != nil {
-			logrus.Warn("owners_dir_blacklist will be deprecated after October 2021, use owners_dir_denylist instead")
-			if res != nil {
-				logrus.Warn("Both owners_dir_blacklist and owners_dir_denylist are provided, owners_dir_blacklist is discarded")
-			} else {
-				res = deprecated
-			}
 		}
 		return res
 	}
